@@ -32,6 +32,98 @@ func TestRouteParamsAndResponseHelpers(t *testing.T) {
 	}
 }
 
+func TestFastHandlerAndJSONResponseFastPaths(t *testing.T) {
+	app := gopress.New()
+	app.HandleFast(http.MethodGet, "/json-string", func(req *gopress.Request, res *gopress.Response) error {
+		return res.JSONString(`{"ok":true}`)
+	})
+	app.HandleFast(http.MethodGet, "/json-bytes", func(req *gopress.Request, res *gopress.Response) error {
+		return res.JSONBytes([]byte(`{"ok":true}`))
+	})
+	app.HandleFast(http.MethodGet, "/status-json", func(req *gopress.Request, res *gopress.Response) error {
+		return res.StatusJSON(http.StatusCreated, `{"created":true}`)
+	})
+	app.HandleFast(http.MethodGet, "/status-send", func(req *gopress.Request, res *gopress.Response) error {
+		return res.StatusSend(http.StatusAccepted, "text/custom", "accepted")
+	})
+
+	for _, tc := range []struct {
+		path        string
+		status      int
+		body        string
+		contentType string
+	}{
+		{path: "/json-string", status: http.StatusOK, body: `{"ok":true}`, contentType: "application/json"},
+		{path: "/json-bytes", status: http.StatusOK, body: `{"ok":true}`, contentType: "application/json"},
+		{path: "/status-json", status: http.StatusCreated, body: `{"created":true}`, contentType: "application/json"},
+		{path: "/status-send", status: http.StatusAccepted, body: "accepted", contentType: "text/custom"},
+	} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+		if rec.Code != tc.status || rec.Body.String() != tc.body {
+			t.Fatalf("%s unexpected response %d %q", tc.path, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != tc.contentType {
+			t.Fatalf("%s unexpected content type %q", tc.path, got)
+		}
+	}
+}
+
+func TestFastHandlerOptionsAvoidUnneededMapsAndSupportParamLookup(t *testing.T) {
+	app := gopress.New()
+	app.HandleFastOptions(http.MethodGet, "/users/:id", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {
+		if req.Params != nil || req.Query != nil || req.Headers != nil || req.Cookies != nil || req.Body != nil || req.Locals != nil {
+			t.Fatalf("fast request should avoid maps by default: %+v", req)
+		}
+		return res.Send(req.Param("id"))
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/123", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "123" {
+		t.Fatalf("unexpected response %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFastHandlerFallthroughKeepsCompatibleRequestPath(t *testing.T) {
+	app := gopress.New()
+	app.HandleFastOptions(http.MethodGet, "/users/:id", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {
+		return nil
+	})
+	app.Get("/users/:id", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		if req.Params == nil || req.Query == nil || req.Headers == nil || req.Cookies == nil || req.Body == nil || req.Locals == nil {
+			t.Fatalf("compatible request maps should be restored after fast fallthrough: %+v", req)
+		}
+		return res.Send(req.Params["id"])
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/123", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "123" {
+		t.Fatalf("unexpected response %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStaticRouteIndexPreservesNextRouteOrder(t *testing.T) {
+	app := gopress.New()
+	app.Get("/health", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return next("route")
+	})
+	app.Get("/health", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return res.Send("fallback")
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "fallback" {
+		t.Fatalf("unexpected response %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestMiddlewareRouterMountAndJSONBody(t *testing.T) {
 	app := gopress.New()
 	app.Use(gopress.JSON())

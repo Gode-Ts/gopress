@@ -1,6 +1,7 @@
 package gopress
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,16 +23,29 @@ var errNextRoute = errors.New("gopress: next route")
 
 type HandlerFunc func(*Request, *Response, NextFunc) error
 
+type FastHandlerFunc func(*Request, *Response) error
+
 type ErrorHandlerFunc func(error, *Request, *Response, NextFunc) error
 
 type NextFunc func(args ...string) error
+
+type FastRequestOptions struct {
+	Params  bool
+	Query   bool
+	Headers bool
+	Cookies bool
+	Body    bool
+	Locals  bool
+}
 
 type App struct {
 	router RouterGroup
 }
 
 type RouterGroup struct {
-	layers []layer
+	layers       []layer
+	staticIndex  map[string][]int
+	hasSlowLayer bool
 }
 
 type Route struct {
@@ -50,6 +64,8 @@ type Request struct {
 	Locals  map[string]any
 	Method  string
 	Path    string
+
+	params []routeParam
 }
 
 type Response struct {
@@ -70,9 +86,30 @@ type ServerConfig struct {
 type layer struct {
 	method        string
 	pattern       string
+	compiled      routePattern
 	prefix        string
+	prefixSlash   string
 	handlers      []HandlerFunc
+	fastHandler   FastHandlerFunc
+	fastOptions   FastRequestOptions
 	errorHandlers []ErrorHandlerFunc
+}
+
+type routePattern struct {
+	static     bool
+	staticPath string
+	segments   []routeSegment
+	paramCount int
+}
+
+type routeSegment struct {
+	kind  byte
+	value string
+}
+
+type routeParam struct {
+	name  string
+	value string
 }
 
 func New() *App {
@@ -141,6 +178,16 @@ func (a *App) Head(path string, handlers ...HandlerFunc) *App {
 	return a
 }
 
+func (a *App) HandleFast(method string, path string, handler FastHandlerFunc) *App {
+	a.router.HandleFast(method, path, handler)
+	return a
+}
+
+func (a *App) HandleFastOptions(method string, path string, options FastRequestOptions, handler FastHandlerFunc) *App {
+	a.router.HandleFastOptions(method, path, options, handler)
+	return a
+}
+
 func (a *App) Route(path string) *RouteBuilder {
 	return a.router.Route(path)
 }
@@ -161,9 +208,9 @@ func (r *RouterGroup) Use(args ...any) *RouterGroup {
 	for _, arg := range args[start:] {
 		switch value := arg.(type) {
 		case HandlerFunc:
-			r.layers = append(r.layers, layer{prefix: prefix, handlers: []HandlerFunc{value}})
+			r.addLayer(newMiddlewareLayer(prefix, []HandlerFunc{value}))
 		case func(*Request, *Response, NextFunc) error:
-			r.layers = append(r.layers, layer{prefix: prefix, handlers: []HandlerFunc{HandlerFunc(value)}})
+			r.addLayer(newMiddlewareLayer(prefix, []HandlerFunc{HandlerFunc(value)}))
 		case *RouterGroup:
 			r.mount(prefix, value)
 		case *App:
@@ -176,7 +223,7 @@ func (r *RouterGroup) Use(args ...any) *RouterGroup {
 }
 
 func (r *RouterGroup) UseError(handler ErrorHandlerFunc) *RouterGroup {
-	r.layers = append(r.layers, layer{prefix: "/", errorHandlers: []ErrorHandlerFunc{handler}})
+	r.addLayer(layer{prefix: "/", prefixSlash: "/", errorHandlers: []ErrorHandlerFunc{handler}})
 	return r
 }
 
@@ -213,7 +260,17 @@ func (r *RouterGroup) Head(path string, handlers ...HandlerFunc) *RouterGroup {
 }
 
 func (r *RouterGroup) Handle(method string, path string, handlers ...HandlerFunc) *RouterGroup {
-	r.layers = append(r.layers, layer{method: strings.ToUpper(method), pattern: normalizePath(path), handlers: handlers})
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, handlers, nil, FastRequestOptions{}))
+	return r
+}
+
+func (r *RouterGroup) HandleFast(method string, path string, handler FastHandlerFunc) *RouterGroup {
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, compatibleFastRequestOptions()))
+	return r
+}
+
+func (r *RouterGroup) HandleFastOptions(method string, path string, options FastRequestOptions, handler FastHandlerFunc) *RouterGroup {
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, options))
 	return r
 }
 
@@ -226,12 +283,27 @@ func (r *RouterGroup) mount(prefix string, child *RouterGroup) {
 		next := childLayer
 		if next.pattern != "" {
 			next.pattern = joinPath(prefix, next.pattern)
+			next.compiled = compileRoutePattern(next.pattern)
 		}
 		if next.prefix != "" {
 			next.prefix = joinPath(prefix, next.prefix)
+			next.prefixSlash = prefixSlash(next.prefix)
 		}
-		r.layers = append(r.layers, next)
+		r.addLayer(next)
 	}
+}
+
+func (r *RouterGroup) addLayer(next layer) {
+	idx := len(r.layers)
+	r.layers = append(r.layers, next)
+	if next.pattern != "" && next.compiled.static {
+		if r.staticIndex == nil {
+			r.staticIndex = map[string][]int{}
+		}
+		r.staticIndex[next.compiled.staticPath] = append(r.staticIndex[next.compiled.staticPath], idx)
+		return
+	}
+	r.hasSlowLayer = true
 }
 
 type RouteBuilder struct {
@@ -280,7 +352,14 @@ func (b *RouteBuilder) Head(handlers ...HandlerFunc) *RouteBuilder {
 }
 
 func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPrefix string) {
-	req := NewRequest(native)
+	if !r.hasSlowLayer {
+		if r.serveStaticOnly(w, native) {
+			return
+		}
+		http.NotFound(w, native)
+		return
+	}
+	var req *Request
 	res := NewResponse(w)
 	for idx := 0; idx < len(r.layers); idx++ {
 		l := r.layers[idx]
@@ -291,8 +370,25 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 		if !ok {
 			continue
 		}
-		req.Params = params
-		err, nextRoute := runHandlers(l.handlers, req, res)
+		if req == nil {
+			if l.fastHandler != nil {
+				req = NewFastRequestWithOptions(native, l.fastOptions)
+			} else {
+				req = NewRequest(native)
+			}
+		} else if l.fastHandler != nil {
+			req.ensureOptions(native, l.fastOptions)
+		} else {
+			req.ensureOptions(native, compatibleFastRequestOptions())
+		}
+		req.setRouteParams(params, l.fastHandler == nil || l.fastOptions.Params)
+		var err error
+		nextRoute := false
+		if l.fastHandler != nil {
+			err = l.fastHandler(req, res)
+		} else {
+			err, nextRoute = runHandlers(l.handlers, req, res)
+		}
 		if nextRoute {
 			continue
 		}
@@ -309,38 +405,101 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 	}
 }
 
-func runHandlers(handlers []HandlerFunc, req *Request, res *Response) (error, bool) {
-	for _, handler := range handlers {
-		nextCalled := false
-		nextRoute := false
-		nextErr := error(nil)
-		next := func(args ...string) error {
-			nextCalled = true
-			if len(args) > 0 {
-				if args[0] == "route" {
-					nextRoute = true
-					return errNextRoute
-				}
-				nextErr = errors.New(args[0])
-				return nextErr
-			}
-			return nil
+func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Request) bool {
+	candidates := r.staticCandidates(native.URL.Path)
+	if len(candidates) == 0 {
+		return false
+	}
+	var req *Request
+	res := NewResponse(w)
+	for _, idx := range candidates {
+		l := r.layers[idx]
+		if l.method != "ALL" && l.method != native.Method {
+			continue
 		}
+		if req == nil {
+			if l.fastHandler != nil {
+				req = NewFastRequestWithOptions(native, l.fastOptions)
+			} else {
+				req = NewRequest(native)
+			}
+		} else if l.fastHandler != nil {
+			req.ensureOptions(native, l.fastOptions)
+		} else {
+			req.ensureOptions(native, compatibleFastRequestOptions())
+		}
+		var err error
+		nextRoute := false
+		if l.fastHandler != nil {
+			err = l.fastHandler(req, res)
+		} else {
+			err, nextRoute = runHandlers(l.handlers, req, res)
+		}
+		if nextRoute {
+			continue
+		}
+		if err != nil {
+			r.handleError(idx+1, err, req, res)
+			return true
+		}
+		if res.written {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *RouterGroup) staticCandidates(path string) []int {
+	if len(r.staticIndex) == 0 {
+		return nil
+	}
+	if candidates := r.staticIndex[path]; len(candidates) > 0 {
+		return candidates
+	}
+	normalized := normalizePath(path)
+	if normalized == path {
+		return nil
+	}
+	return r.staticIndex[normalized]
+}
+
+func runHandlers(handlers []HandlerFunc, req *Request, res *Response) (error, bool) {
+	state := nextState{}
+	next := func(args ...string) error {
+		state.called = true
+		if len(args) > 0 {
+			if args[0] == "route" {
+				state.route = true
+				return errNextRoute
+			}
+			state.err = errors.New(args[0])
+			return state.err
+		}
+		return nil
+	}
+	for _, handler := range handlers {
+		state = nextState{}
 		err := handler(req, res, next)
-		if errors.Is(err, errNextRoute) || nextRoute {
+		if errors.Is(err, errNextRoute) || state.route {
 			return nil, true
 		}
 		if err != nil {
 			return err, false
 		}
-		if nextErr != nil {
-			return nextErr, false
+		if state.err != nil {
+			return state.err, false
 		}
-		if !nextCalled {
+		if !state.called {
 			return nil, false
 		}
 	}
 	return nil, false
+}
+
+type nextState struct {
+	called bool
+	route  bool
+	err    error
 }
 
 func (r *RouterGroup) handleError(start int, err error, req *Request, res *Response) {
@@ -349,17 +508,17 @@ func (r *RouterGroup) handleError(start int, err error, req *Request, res *Respo
 		if len(l.errorHandlers) == 0 {
 			continue
 		}
-		for _, handler := range l.errorHandlers {
-			nextCalled := false
-			nextErr := error(nil)
-			next := func(args ...string) error {
-				nextCalled = true
-				if len(args) > 0 {
-					nextErr = errors.New(args[0])
-					return nextErr
-				}
-				return nil
+		state := nextState{}
+		next := func(args ...string) error {
+			state.called = true
+			if len(args) > 0 {
+				state.err = errors.New(args[0])
+				return state.err
 			}
+			return nil
+		}
+		for _, handler := range l.errorHandlers {
+			state = nextState{}
 			if handlerErr := handler(err, req, res, next); handlerErr != nil {
 				err = handlerErr
 				continue
@@ -367,11 +526,11 @@ func (r *RouterGroup) handleError(start int, err error, req *Request, res *Respo
 			if res.written {
 				return
 			}
-			if !nextCalled {
+			if !state.called {
 				return
 			}
-			if nextErr != nil {
-				err = nextErr
+			if state.err != nil {
+				err = state.err
 			}
 		}
 	}
@@ -381,17 +540,17 @@ func (r *RouterGroup) handleError(start int, err error, req *Request, res *Respo
 	}
 }
 
-func (l layer) matches(method string, path string) (map[string]string, bool) {
+func (l layer) matches(method string, path string) ([]routeParam, bool) {
 	if l.pattern != "" {
 		if l.method != "ALL" && l.method != method {
 			return nil, false
 		}
-		return matchPattern(l.pattern, path)
+		return l.compiled.match(path)
 	}
 	if l.prefix != "" {
-		return map[string]string{}, pathHasPrefix(path, l.prefix)
+		return nil, pathHasPrefixPrepared(path, l.prefix, l.prefixSlash)
 	}
-	return map[string]string{}, true
+	return nil, true
 }
 
 func NewRequest(req *http.Request) *Request {
@@ -422,6 +581,134 @@ func NewRequest(req *http.Request) *Request {
 		Method:  req.Method,
 		Path:    req.URL.Path,
 	}
+}
+
+func NewFastRequest(req *http.Request) *Request {
+	return NewFastRequestWithOptions(req, compatibleFastRequestOptions())
+}
+
+func NewFastRequestWithOptions(req *http.Request, options FastRequestOptions) *Request {
+	request := &Request{
+		Native: req,
+		Method: req.Method,
+		Path:   req.URL.Path,
+	}
+	if options.Params {
+		request.Params = map[string]string{}
+	}
+	if options.Query {
+		request.Query = firstQueryValues(req)
+	}
+	if options.Headers {
+		request.Headers = firstHeaderValues(req)
+	}
+	if options.Cookies {
+		request.Cookies = cookieValues(req)
+	}
+	if options.Body {
+		request.Body = map[string]any{}
+	}
+	if options.Locals {
+		request.Locals = map[string]any{}
+	}
+	return request
+}
+
+func compatibleFastRequestOptions() FastRequestOptions {
+	return FastRequestOptions{
+		Params:  true,
+		Query:   true,
+		Headers: true,
+		Cookies: true,
+		Body:    true,
+		Locals:  true,
+	}
+}
+
+func firstQueryValues(req *http.Request) map[string]string {
+	query := map[string]string{}
+	for key, values := range req.URL.Query() {
+		if len(values) > 0 {
+			query[key] = values[0]
+		}
+	}
+	return query
+}
+
+func firstHeaderValues(req *http.Request) map[string]string {
+	headers := map[string]string{}
+	for key, values := range req.Header {
+		if len(values) > 0 {
+			headers[strings.ToLower(key)] = values[0]
+		}
+	}
+	return headers
+}
+
+func cookieValues(req *http.Request) map[string]string {
+	cookies := map[string]string{}
+	for _, cookie := range req.Cookies() {
+		cookies[cookie.Name] = cookie.Value
+	}
+	return cookies
+}
+
+func (r *Request) Param(name string) string {
+	if r.Params != nil {
+		if value, ok := r.Params[name]; ok {
+			return value
+		}
+	}
+	for _, param := range r.params {
+		if param.name == name {
+			return param.value
+		}
+	}
+	return ""
+}
+
+func (r *Request) setRouteParams(params []routeParam, materializeMap bool) {
+	r.params = params
+	if materializeMap {
+		if len(params) == 0 {
+			if r.Params == nil {
+				r.Params = map[string]string{}
+			}
+			return
+		}
+		r.Params = paramsToMap(params)
+		return
+	}
+	r.Params = nil
+}
+
+func (r *Request) ensureOptions(req *http.Request, options FastRequestOptions) {
+	if options.Params && r.Params == nil {
+		r.Params = map[string]string{}
+	}
+	if options.Query && r.Query == nil {
+		r.Query = firstQueryValues(req)
+	}
+	if options.Headers && r.Headers == nil {
+		r.Headers = firstHeaderValues(req)
+	}
+	if options.Cookies && r.Cookies == nil {
+		r.Cookies = cookieValues(req)
+	}
+	if options.Body && r.Body == nil {
+		r.Body = map[string]any{}
+	}
+	if options.Locals && r.Locals == nil {
+		r.Locals = map[string]any{}
+	}
+}
+
+func paramsToMap(params []routeParam) map[string]string {
+	values := make(map[string]string, len(params))
+	for _, param := range params {
+		values[param.name] = param.value
+	}
+	return values
 }
 
 func NewResponse(w http.ResponseWriter) *Response {
@@ -462,12 +749,43 @@ func (r *Response) Send(body string) error {
 	return err
 }
 
+func (r *Response) StatusSend(status int, contentType string, body string) error {
+	r.status = status
+	if contentType != "" {
+		r.contentType = contentType
+	}
+	return r.Send(body)
+}
+
 func (r *Response) JSON(value any) error {
 	if r.contentType == "" {
 		r.contentType = "application/json"
 	}
 	r.writeHeaders()
 	return json.NewEncoder(r.writer).Encode(value)
+}
+
+func (r *Response) JSONString(body string) error {
+	if r.contentType == "" {
+		r.contentType = "application/json"
+	}
+	r.writeHeaders()
+	_, err := io.WriteString(r.writer, body)
+	return err
+}
+
+func (r *Response) JSONBytes(body []byte) error {
+	if r.contentType == "" {
+		r.contentType = "application/json"
+	}
+	r.writeHeaders()
+	_, err := r.writer.Write(body)
+	return err
+}
+
+func (r *Response) StatusJSON(status int, body string) error {
+	r.status = status
+	return r.JSONString(body)
 }
 
 func (r *Response) Redirect(args ...any) error {
@@ -534,7 +852,7 @@ func JSON() HandlerFunc {
 		if err != nil {
 			return err
 		}
-		if len(strings.TrimSpace(string(data))) == 0 {
+		if len(bytes.TrimSpace(data)) == 0 {
 			return next()
 		}
 		return json.Unmarshal(data, &req.Body)
@@ -612,26 +930,11 @@ func ListenAndServe(config ServerConfig) error {
 }
 
 func matchPattern(pattern string, path string) (map[string]string, bool) {
-	patternParts := splitPath(pattern)
-	pathParts := splitPath(path)
-	if len(patternParts) != len(pathParts) {
-		return nil, false
+	params, ok := compileRoutePattern(normalizePath(pattern)).match(path)
+	if !ok || len(params) == 0 {
+		return nil, ok
 	}
-	params := map[string]string{}
-	for i, part := range patternParts {
-		if strings.HasPrefix(part, ":") {
-			params[strings.TrimPrefix(part, ":")] = pathParts[i]
-			continue
-		}
-		if strings.HasPrefix(part, "*") {
-			params[strings.TrimPrefix(part, "*")] = strings.Join(pathParts[i:], "/")
-			return params, true
-		}
-		if part != pathParts[i] {
-			return nil, false
-		}
-	}
-	return params, true
+	return paramsToMap(params), true
 }
 
 func splitPath(path string) []string {
@@ -643,12 +946,119 @@ func splitPath(path string) []string {
 }
 
 func pathHasPrefix(path string, prefix string) bool {
-	prefix = normalizePath(prefix)
+	return pathHasPrefixPrepared(path, normalizePath(prefix), prefixSlash(prefix))
+}
+
+func pathHasPrefixPrepared(path string, prefix string, slash string) bool {
 	if prefix == "/" {
 		return true
 	}
 	path = normalizePath(path)
-	return path == prefix || strings.HasPrefix(path, strings.TrimRight(prefix, "/")+"/")
+	return path == prefix || strings.HasPrefix(path, slash)
+}
+
+func newRouteLayer(method string, path string, handlers []HandlerFunc, fastHandler FastHandlerFunc, fastOptions FastRequestOptions) layer {
+	pattern := normalizePath(path)
+	return layer{method: method, pattern: pattern, compiled: compileRoutePattern(pattern), handlers: handlers, fastHandler: fastHandler, fastOptions: fastOptions}
+}
+
+func newMiddlewareLayer(prefix string, handlers []HandlerFunc) layer {
+	prefix = normalizePath(prefix)
+	return layer{prefix: prefix, prefixSlash: prefixSlash(prefix), handlers: handlers}
+}
+
+func prefixSlash(prefix string) string {
+	prefix = normalizePath(prefix)
+	if prefix == "/" {
+		return "/"
+	}
+	return strings.TrimRight(prefix, "/") + "/"
+}
+
+func compileRoutePattern(pattern string) routePattern {
+	parts := splitPath(pattern)
+	compiled := routePattern{static: true, staticPath: pattern, segments: make([]routeSegment, 0, len(parts))}
+	for _, part := range parts {
+		switch {
+		case strings.HasPrefix(part, ":"):
+			compiled.static = false
+			compiled.paramCount++
+			compiled.segments = append(compiled.segments, routeSegment{kind: ':', value: strings.TrimPrefix(part, ":")})
+		case strings.HasPrefix(part, "*"):
+			compiled.static = false
+			compiled.paramCount++
+			compiled.segments = append(compiled.segments, routeSegment{kind: '*', value: strings.TrimPrefix(part, "*")})
+		default:
+			compiled.segments = append(compiled.segments, routeSegment{kind: 's', value: part})
+		}
+	}
+	return compiled
+}
+
+func (p routePattern) match(path string) ([]routeParam, bool) {
+	if p.static {
+		return nil, p.staticPath == path || normalizePath(path) == p.staticPath
+	}
+
+	pos := 0
+	var params []routeParam
+	for i, segment := range p.segments {
+		if segment.kind == '*' {
+			if params == nil && p.paramCount > 0 {
+				params = make([]routeParam, 0, p.paramCount)
+			}
+			params = append(params, routeParam{name: segment.value, value: restPath(path, pos)})
+			return params, true
+		}
+		part, next, ok := nextPathSegment(path, pos)
+		if !ok {
+			return nil, false
+		}
+		switch segment.kind {
+		case ':':
+			if params == nil {
+				params = make([]routeParam, 0, p.paramCount)
+			}
+			params = append(params, routeParam{name: segment.value, value: part})
+		default:
+			if segment.value != part {
+				return nil, false
+			}
+		}
+		pos = next
+		if i == len(p.segments)-1 && hasMorePath(path, pos) {
+			return nil, false
+		}
+	}
+	return params, !hasMorePath(path, pos)
+}
+
+func nextPathSegment(path string, pos int) (string, int, bool) {
+	for pos < len(path) && path[pos] == '/' {
+		pos++
+	}
+	if pos >= len(path) {
+		return "", pos, false
+	}
+	start := pos
+	for pos < len(path) && path[pos] != '/' {
+		pos++
+	}
+	return path[start:pos], pos, true
+}
+
+func restPath(path string, pos int) string {
+	for pos < len(path) && path[pos] == '/' {
+		pos++
+	}
+	return path[pos:]
+}
+
+func hasMorePath(path string, pos int) bool {
+	for pos < len(path) && path[pos] == '/' {
+		pos++
+	}
+	return pos < len(path)
 }
 
 func joinPath(prefix string, path string) string {

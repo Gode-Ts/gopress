@@ -1,0 +1,153 @@
+package gopress_test
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/Gode-Ts/gopress"
+)
+
+func BenchmarkGopressStaticRouteFast(b *testing.B) {
+	app := gopress.New()
+	app.HandleFastOptions(http.MethodGet, "/bench", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {
+		return res.StatusJSON(http.StatusOK, `{"runtime":"gopress"}`)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/bench", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressParamRoute(b *testing.B) {
+	app := gopress.New()
+	app.Get("/users/:id", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return res.Send(req.Params["id"])
+	})
+	req := httptest.NewRequest(http.MethodGet, "/users/123", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressParamRouteFast(b *testing.B) {
+	app := gopress.New()
+	app.HandleFastOptions(http.MethodGet, "/users/:id", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {
+		return res.Send(req.Param("id"))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/users/123", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressMiddlewareChain(b *testing.B) {
+	app := gopress.New()
+	for i := 0; i < 10; i++ {
+		app.Use(func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+			return next()
+		})
+	}
+	app.Get("/middleware", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return res.Send("ok")
+	})
+	req := httptest.NewRequest(http.MethodGet, "/middleware", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressNotFoundManyRoutes(b *testing.B) {
+	app := gopress.New()
+	for i := 0; i < 100; i++ {
+		path := fmt.Sprintf("/route-%d", i)
+		app.Get(path, func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+			return res.Send("ok")
+		})
+	}
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressJSONResponse(b *testing.B) {
+	app := gopress.New()
+	app.Get("/json", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return res.JSON(map[string]any{"id": "123", "ok": true})
+	})
+	req := httptest.NewRequest(http.MethodGet, "/json", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressJSONBytesResponse(b *testing.B) {
+	app := gopress.New()
+	app.HandleFastOptions(http.MethodGet, "/json", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {
+		return res.JSONBytes([]byte(`{"id":"123","ok":true}`))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/json", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkGopressJSONBody(b *testing.B) {
+	app := gopress.New()
+	app.Use(gopress.JSON())
+	app.Post("/echo", func(req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return res.JSON(req.Body)
+	})
+	body := []byte(`{"name":"Ada","role":"engineer"}`)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/echo", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		app.ServeHTTP(rec, req)
+	}
+}
+
+func BenchmarkNativeHTTPStaticRoute(b *testing.B) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/bench" {
+			http.NotFound(w, req)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"runtime":"native"}`)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/bench", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+	}
+}
