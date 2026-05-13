@@ -67,7 +67,7 @@ type Request struct {
 	Method  string
 	Path    string
 
-	params []routeParam
+	params routeParams
 }
 
 type Response struct {
@@ -113,6 +113,33 @@ type routeSegment struct {
 type routeParam struct {
 	name  string
 	value string
+}
+
+type routeParams struct {
+	inline [1]routeParam
+	extra  []routeParam
+	count  int
+}
+
+func (p *routeParams) append(name string, value string) {
+	if p.count < len(p.inline) {
+		p.inline[p.count] = routeParam{name: name, value: value}
+		p.count++
+		return
+	}
+	p.extra = append(p.extra, routeParam{name: name, value: value})
+	p.count++
+}
+
+func (p routeParams) len() int {
+	return p.count
+}
+
+func (p routeParams) at(idx int) routeParam {
+	if idx < len(p.inline) {
+		return p.inline[idx]
+	}
+	return p.extra[idx-len(p.inline)]
 }
 
 func New() *App {
@@ -574,17 +601,17 @@ func (r *RouterGroup) handleError(start int, err error, req *Request, res *Respo
 	}
 }
 
-func (l layer) matches(method string, path string) ([]routeParam, bool) {
+func (l layer) matches(method string, path string) (routeParams, bool) {
 	if l.pattern != "" {
 		if l.method != "ALL" && l.method != method {
-			return nil, false
+			return routeParams{}, false
 		}
 		return l.compiled.match(path)
 	}
 	if l.prefix != "" {
-		return nil, pathHasPrefixPrepared(path, l.prefix, l.prefixSlash)
+		return routeParams{}, pathHasPrefixPrepared(path, l.prefix, l.prefixSlash)
 	}
-	return nil, true
+	return routeParams{}, true
 }
 
 func NewRequest(req *http.Request) *Request {
@@ -693,7 +720,8 @@ func (r *Request) Param(name string) string {
 			return value
 		}
 	}
-	for _, param := range r.params {
+	for idx := 0; idx < r.params.len(); idx++ {
+		param := r.params.at(idx)
 		if param.name == name {
 			return param.value
 		}
@@ -701,10 +729,10 @@ func (r *Request) Param(name string) string {
 	return ""
 }
 
-func (r *Request) setRouteParams(params []routeParam, materializeMap bool) {
+func (r *Request) setRouteParams(params routeParams, materializeMap bool) {
 	r.params = params
 	if materializeMap {
-		if len(params) == 0 {
+		if params.len() == 0 {
 			if r.Params == nil {
 				r.Params = map[string]string{}
 			}
@@ -737,9 +765,10 @@ func (r *Request) ensureOptions(req *http.Request, options FastRequestOptions) {
 	}
 }
 
-func paramsToMap(params []routeParam) map[string]string {
-	values := make(map[string]string, len(params))
-	for _, param := range params {
+func paramsToMap(params routeParams) map[string]string {
+	values := make(map[string]string, params.len())
+	for idx := 0; idx < params.len(); idx++ {
+		param := params.at(idx)
 		values[param.name] = param.value
 	}
 	return values
@@ -1008,7 +1037,7 @@ func ListenAndServe(config ServerConfig) error {
 
 func matchPattern(pattern string, path string) (map[string]string, bool) {
 	params, ok := compileRoutePattern(normalizePath(pattern)).match(path)
-	if !ok || len(params) == 0 {
+	if !ok || params.len() == 0 {
 		return nil, ok
 	}
 	return paramsToMap(params), true
@@ -1072,39 +1101,33 @@ func compileRoutePattern(pattern string) routePattern {
 	return compiled
 }
 
-func (p routePattern) match(path string) ([]routeParam, bool) {
+func (p routePattern) match(path string) (routeParams, bool) {
 	if p.static {
-		return nil, p.staticPath == path || normalizePath(path) == p.staticPath
+		return routeParams{}, p.staticPath == path || normalizePath(path) == p.staticPath
 	}
 
 	pos := 0
-	var params []routeParam
+	params := routeParams{}
 	for i, segment := range p.segments {
 		if segment.kind == '*' {
-			if params == nil && p.paramCount > 0 {
-				params = make([]routeParam, 0, p.paramCount)
-			}
-			params = append(params, routeParam{name: segment.value, value: restPath(path, pos)})
+			params.append(segment.value, restPath(path, pos))
 			return params, true
 		}
 		part, next, ok := nextPathSegment(path, pos)
 		if !ok {
-			return nil, false
+			return routeParams{}, false
 		}
 		switch segment.kind {
 		case ':':
-			if params == nil {
-				params = make([]routeParam, 0, p.paramCount)
-			}
-			params = append(params, routeParam{name: segment.value, value: part})
+			params.append(segment.value, part)
 		default:
 			if segment.value != part {
-				return nil, false
+				return routeParams{}, false
 			}
 		}
 		pos = next
 		if i == len(p.segments)-1 && hasMorePath(path, pos) {
-			return nil, false
+			return routeParams{}, false
 		}
 	}
 	return params, !hasMorePath(path, pos)
