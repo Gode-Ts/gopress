@@ -490,6 +490,26 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 		if len(l.errorHandlers) > 0 {
 			continue
 		}
+		if l.rawSingleParam != nil && l.rawParamDirect {
+			param, ok := l.matchesDirectParam(native.Method, native.URL.Path)
+			if !ok {
+				continue
+			}
+			if err := l.rawSingleParam(w, native, param); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		if l.rawTwoParams != nil && l.rawParamDirect {
+			first, second, ok := l.matchesDirectTwoParams(native.Method, native.URL.Path)
+			if !ok {
+				continue
+			}
+			if err := l.rawTwoParams(w, native, first, second); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
 		params, ok := l.matches(native.Method, native.URL.Path)
 		if !ok {
 			continue
@@ -730,6 +750,20 @@ func (l layer) matches(method string, path string) (routeParams, bool) {
 		return routeParams{}, pathHasPrefixPrepared(path, l.prefix, l.prefixSlash)
 	}
 	return routeParams{}, true
+}
+
+func (l layer) matchesDirectParam(method string, path string) (string, bool) {
+	if l.pattern == "" || (l.method != "ALL" && l.method != method) {
+		return "", false
+	}
+	return l.compiled.matchDirectParam(path)
+}
+
+func (l layer) matchesDirectTwoParams(method string, path string) (string, string, bool) {
+	if l.pattern == "" || (l.method != "ALL" && l.method != method) {
+		return "", "", false
+	}
+	return l.compiled.matchDirectTwoParams(path)
 }
 
 func NewRequest(req *http.Request) *Request {
@@ -1330,6 +1364,56 @@ func (p routePattern) match(path string) (routeParams, bool) {
 		}
 	}
 	return params, !hasMorePath(path, pos)
+}
+
+func (p routePattern) matchDirectParam(path string) (string, bool) {
+	values, ok := p.matchDirectParams(path, 1)
+	return values[0], ok
+}
+
+func (p routePattern) matchDirectTwoParams(path string) (string, string, bool) {
+	values, ok := p.matchDirectParams(path, 2)
+	return values[0], values[1], ok
+}
+
+func (p routePattern) matchDirectParams(path string, want int) ([2]string, bool) {
+	var values [2]string
+	if p.static || p.paramCount != want {
+		return values, false
+	}
+	pos := 0
+	count := 0
+	for i, segment := range p.segments {
+		if segment.kind == '*' {
+			if count >= want {
+				return values, false
+			}
+			values[count] = restPath(path, pos)
+			count++
+			return values, count == want
+		}
+		part, next, ok := nextPathSegment(path, pos)
+		if !ok {
+			return values, false
+		}
+		switch segment.kind {
+		case ':':
+			if count >= want {
+				return values, false
+			}
+			values[count] = part
+			count++
+		default:
+			if segment.value != part {
+				return values, false
+			}
+		}
+		pos = next
+		if i == len(p.segments)-1 && hasMorePath(path, pos) {
+			return values, false
+		}
+	}
+	return values, count == want && !hasMorePath(path, pos)
 }
 
 func (p routePattern) singleParamName() string {
