@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -792,11 +793,46 @@ func (r *RouterGroup) routeCandidates(path string) []int {
 	if len(r.routeIndex) == 0 {
 		return nil
 	}
-	segment, ok := firstPathSegment(path)
-	if !ok {
+	path = trimLeadingSlashes(path)
+	if path == "" {
 		return nil
 	}
-	return r.routeIndex[segment]
+	var out []int
+	copied := false
+	pos := 0
+	for pos < len(path) {
+		start := pos
+		for pos < len(path) && path[pos] != '/' {
+			pos++
+		}
+		if pos > start {
+			out, copied = appendIndexedCandidates(out, copied, r.routeIndex[path[:pos]])
+		}
+		for pos < len(path) && path[pos] == '/' {
+			pos++
+		}
+	}
+	if copied && len(out) > 1 {
+		sort.Ints(out)
+	}
+	return out
+}
+
+func appendIndexedCandidates(out []int, copied bool, candidates []int) ([]int, bool) {
+	if len(candidates) == 0 {
+		return out, copied
+	}
+	if out == nil {
+		return candidates, false
+	}
+	if !copied {
+		next := make([]int, 0, len(out)+len(candidates))
+		next = append(next, out...)
+		out = next
+		copied = true
+	}
+	out = append(out, candidates...)
+	return out, copied
 }
 
 func runHandlers(handlers []HandlerFunc, req *Request, res *Response) (error, bool) {
@@ -1586,16 +1622,37 @@ func (p routePattern) twoParamNames() (string, string, bool) {
 
 func (p routePattern) firstIndexSegment() (string, bool) {
 	if p.static {
-		return firstPathSegment(p.staticPath)
+		return staticPathIndexKey(p.staticPath)
 	}
 	if len(p.segments) == 0 {
 		return "", false
 	}
-	first := p.segments[0]
-	if first.kind != 's' || first.value == "" {
+	var b strings.Builder
+	for _, segment := range p.segments {
+		if segment.kind != 's' {
+			break
+		}
+		if segment.value == "" {
+			return "", false
+		}
+		if b.Len() > 0 {
+			b.WriteByte('/')
+		}
+		b.WriteString(segment.value)
+	}
+	if b.Len() == 0 {
 		return "", false
 	}
-	return first.value, true
+	return b.String(), true
+}
+
+func staticPathIndexKey(path string) (string, bool) {
+	path = trimLeadingSlashes(path)
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return "", false
+	}
+	return path, true
 }
 
 func nextPathSegment(path string, pos int) (string, int, bool) {
@@ -1613,9 +1670,7 @@ func nextPathSegment(path string, pos int) (string, int, bool) {
 }
 
 func firstPathSegment(path string) (string, bool) {
-	for len(path) > 0 && path[0] == '/' {
-		path = path[1:]
-	}
+	path = trimLeadingSlashes(path)
 	if path == "" {
 		return "", false
 	}
@@ -1623,6 +1678,13 @@ func firstPathSegment(path string) (string, bool) {
 		return path[:idx], idx > 0
 	}
 	return path, true
+}
+
+func trimLeadingSlashes(path string) string {
+	for len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+	return path
 }
 
 func restPath(path string, pos int) string {

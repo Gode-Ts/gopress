@@ -91,6 +91,42 @@ func TestRouterIndexesMixedStaticAndDynamicRoutes(t *testing.T) {
 	}
 }
 
+func TestRouterIndexesRoutesByLeadingStaticPrefix(t *testing.T) {
+	router := NewRouter()
+	router.HandleRawParam("GET", "/api/users/:id", "id", func(http.ResponseWriter, *http.Request, string) error {
+		return nil
+	})
+	router.HandleRawParam("GET", "/api/posts/:id", "id", func(http.ResponseWriter, *http.Request, string) error {
+		return nil
+	})
+
+	if got := len(router.routeIndex["api/users"]); got != 1 {
+		t.Fatalf("expected one api/users candidate, got %d", got)
+	}
+	if got := len(router.routeIndex["api/posts"]); got != 1 {
+		t.Fatalf("expected one api/posts candidate, got %d", got)
+	}
+	if got := len(router.routeIndex["api"]); got != 0 {
+		t.Fatalf("expected no broad api candidates, got %d", got)
+	}
+}
+
+func TestRouterLeadingStaticPrefixIndexIncludesParentCandidates(t *testing.T) {
+	router := NewRouter()
+	router.HandleRawParam("GET", "/api/:kind/:id", "kind", func(w http.ResponseWriter, _ *http.Request, kind string) error {
+		return WriteRawString(w, http.StatusOK, "text/plain", "generic:"+kind)
+	})
+	router.HandleRawParam("GET", "/api/users/:id", "id", func(w http.ResponseWriter, _ *http.Request, id string) error {
+		return WriteRawString(w, http.StatusOK, "text/plain", "users:"+id)
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/users/123", nil))
+	if rec.Body.String() != "generic:users" {
+		t.Fatalf("expected parent candidate to preserve registration order, got %q", rec.Body.String())
+	}
+}
+
 func TestRouterFirstSegmentIndexPreservesRegistrationOrder(t *testing.T) {
 	router := NewRouter()
 	router.HandleRawParam("GET", "/users/:id", "id", func(w http.ResponseWriter, _ *http.Request, id string) error {
@@ -123,6 +159,14 @@ func BenchmarkRouterMixedStaticDynamicRoutesScan(b *testing.B) {
 	benchmarkMixedStaticDynamicRoutes(b, false)
 }
 
+func BenchmarkRouterSharedPrefixDynamicRoutesIndexed(b *testing.B) {
+	benchmarkSharedPrefixDynamicRoutes(b, true)
+}
+
+func BenchmarkRouterSharedPrefixDynamicRoutesScan(b *testing.B) {
+	benchmarkSharedPrefixDynamicRoutes(b, false)
+}
+
 func benchmarkManyDynamicRawParamRoutes(b *testing.B, indexed bool) {
 	router := NewRouter()
 	for i := 0; i < 100; i++ {
@@ -135,6 +179,26 @@ func benchmarkManyDynamicRawParamRoutes(b *testing.B, indexed bool) {
 		router.hasOrderSensitiveLayer = true
 	}
 	req := httptest.NewRequest(http.MethodGet, "/resource-99/123", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+	}
+}
+
+func benchmarkSharedPrefixDynamicRoutes(b *testing.B, indexed bool) {
+	router := NewRouter()
+	for i := 0; i < 100; i++ {
+		path := fmt.Sprintf("/api/resource-%d/:id", i)
+		router.HandleRawParam(http.MethodGet, path, "id", func(w http.ResponseWriter, req *http.Request, id string) error {
+			return WriteJSONBytes(w, http.StatusOK, []byte(`{"id":"`+id+`"}`))
+		})
+	}
+	if !indexed {
+		router.hasOrderSensitiveLayer = true
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/resource-99/123", nil)
 
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
