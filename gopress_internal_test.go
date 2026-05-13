@@ -48,9 +48,15 @@ func TestRoutePatternMatchDirectParam(t *testing.T) {
 
 func TestRoutePatternMatchDirectTwoParams(t *testing.T) {
 	pattern := compileRoutePattern("/users/:userId/notes/:noteId")
+	if !pattern.directTwo.ok {
+		t.Fatal("expected two-param route to precompute direct matcher")
+	}
 	first, second, ok := pattern.matchDirectTwoParams("/users/u1/notes/n2")
 	if !ok || first != "u1" || second != "n2" {
 		t.Fatalf("expected direct params u1/n2, got first=%q second=%q ok=%v", first, second, ok)
+	}
+	if first, second, ok := pattern.matchDirectTwoParams("/users//u1//notes//n2/"); !ok || first != "u1" || second != "n2" {
+		t.Fatalf("expected duplicate slash direct params u1/n2, got first=%q second=%q ok=%v", first, second, ok)
 	}
 	if _, _, ok := pattern.matchDirectTwoParams("/users/u1/notes/n2/extra"); ok {
 		t.Fatal("expected trailing segment to miss")

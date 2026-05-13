@@ -125,6 +125,7 @@ type routePattern struct {
 	segments     []routeSegment
 	paramCount   int
 	directSingle directSingleParamPattern
+	directTwo    directTwoParamPattern
 }
 
 type routeSegment struct {
@@ -136,6 +137,12 @@ type directSingleParamPattern struct {
 	ok     bool
 	prefix string
 	suffix string
+}
+
+type directTwoParamPattern struct {
+	ok     bool
+	prefix string
+	infix  string
 }
 
 type routeParam struct {
@@ -1512,6 +1519,7 @@ func compileRoutePattern(pattern string) routePattern {
 		}
 	}
 	compiled.directSingle = compileDirectSingleParamPattern(compiled)
+	compiled.directTwo = compileDirectTwoParamPattern(compiled)
 	return compiled
 }
 
@@ -1556,6 +1564,11 @@ func (p routePattern) matchDirectParam(path string) (string, bool) {
 }
 
 func (p routePattern) matchDirectTwoParams(path string) (string, string, bool) {
+	if p.directTwo.ok {
+		if first, second, ok := p.directTwo.match(path); ok {
+			return first, second, true
+		}
+	}
 	values, ok := p.matchDirectParams(path, 2)
 	return values[0], values[1], ok
 }
@@ -1734,6 +1747,108 @@ func (p directSingleParamPattern) match(path string) (string, bool) {
 		return "", false
 	}
 	return value, true
+}
+
+func compileDirectTwoParamPattern(pattern routePattern) directTwoParamPattern {
+	if pattern.static || pattern.paramCount != 2 {
+		return directTwoParamPattern{}
+	}
+	prefixParts := make([]string, 0, len(pattern.segments))
+	infixParts := make([]string, 0, len(pattern.segments))
+	paramCount := 0
+	for _, segment := range pattern.segments {
+		switch segment.kind {
+		case ':':
+			paramCount++
+			if paramCount > 2 {
+				return directTwoParamPattern{}
+			}
+		case '*':
+			return directTwoParamPattern{}
+		default:
+			switch paramCount {
+			case 0:
+				prefixParts = append(prefixParts, segment.value)
+			case 1:
+				infixParts = append(infixParts, segment.value)
+			default:
+				return directTwoParamPattern{}
+			}
+		}
+	}
+	if paramCount != 2 {
+		return directTwoParamPattern{}
+	}
+	return directTwoParamPattern{
+		ok:     true,
+		prefix: slashDelimitedPrefix(prefixParts),
+		infix:  slashDelimitedPrefix(infixParts),
+	}
+}
+
+func (p directTwoParamPattern) match(path string) (string, string, bool) {
+	start, ok := consumeDirectPrefix(path, p.prefix)
+	if !ok {
+		return "", "", false
+	}
+	for start < len(path) && path[start] == '/' {
+		start++
+	}
+	if start >= len(path) {
+		return "", "", false
+	}
+	idx := strings.Index(path[start:], p.infix)
+	if idx < 0 {
+		return "", "", false
+	}
+	firstEnd := start + idx
+	for firstEnd > start && path[firstEnd-1] == '/' {
+		firstEnd--
+	}
+	if firstEnd <= start {
+		return "", "", false
+	}
+	first := path[start:firstEnd]
+	if strings.Contains(first, "/") {
+		return "", "", false
+	}
+	secondStart := start + idx + len(p.infix)
+	for secondStart < len(path) && path[secondStart] == '/' {
+		secondStart++
+	}
+	secondEnd := len(path)
+	for secondEnd > secondStart && path[secondEnd-1] == '/' {
+		secondEnd--
+	}
+	if secondEnd <= secondStart {
+		return "", "", false
+	}
+	second := path[secondStart:secondEnd]
+	if strings.Contains(second, "/") {
+		return "", "", false
+	}
+	return first, second, true
+}
+
+func slashDelimitedPrefix(parts []string) string {
+	if len(parts) == 0 {
+		return "/"
+	}
+	return "/" + strings.Join(parts, "/") + "/"
+}
+
+func consumeDirectPrefix(path string, prefix string) (int, bool) {
+	if prefix == "/" {
+		pos := 0
+		for pos < len(path) && path[pos] == '/' {
+			pos++
+		}
+		return pos, true
+	}
+	if len(path) >= len(prefix) && path[:len(prefix)] == prefix {
+		return len(prefix), true
+	}
+	return 0, false
 }
 
 func staticPathIndexKey(path string) (string, bool) {
