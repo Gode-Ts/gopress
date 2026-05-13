@@ -30,6 +30,8 @@ type RawHandlerFunc func(http.ResponseWriter, *http.Request) error
 
 type RawParamHandlerFunc func(http.ResponseWriter, *http.Request, Params) error
 
+type RawSingleParamHandlerFunc func(http.ResponseWriter, *http.Request, string) error
+
 type ErrorHandlerFunc func(error, *Request, *Response, NextFunc) error
 
 type NextFunc func(args ...string) error
@@ -102,6 +104,9 @@ type layer struct {
 	fastHandler     FastHandlerFunc
 	rawHandler      RawHandlerFunc
 	rawParamHandler RawParamHandlerFunc
+	rawSingleParam  RawSingleParamHandlerFunc
+	rawParamName    string
+	rawParamDirect  bool
 	fastOptions     FastRequestOptions
 	errorHandlers   []ErrorHandlerFunc
 }
@@ -148,6 +153,23 @@ func (p routeParams) at(idx int) routeParam {
 		return p.inline[idx]
 	}
 	return p.extra[idx-len(p.inline)]
+}
+
+func (p routeParams) get(name string) string {
+	for idx := 0; idx < p.len(); idx++ {
+		param := p.at(idx)
+		if param.name == name {
+			return param.value
+		}
+	}
+	return ""
+}
+
+func (p routeParams) directOrGet(name string, direct bool) string {
+	if direct && p.len() == 1 {
+		return p.at(0).value
+	}
+	return p.get(name)
 }
 
 func New() *App {
@@ -233,6 +255,11 @@ func (a *App) HandleRaw(method string, path string, handler RawHandlerFunc) *App
 
 func (a *App) HandleRawParams(method string, path string, handler RawParamHandlerFunc) *App {
 	a.router.HandleRawParams(method, path, handler)
+	return a
+}
+
+func (a *App) HandleRawParam(method string, path string, paramName string, handler RawSingleParamHandlerFunc) *App {
+	a.router.HandleRawParam(method, path, paramName, handler)
 	return a
 }
 
@@ -329,6 +356,15 @@ func (r *RouterGroup) HandleRaw(method string, path string, handler RawHandlerFu
 
 func (r *RouterGroup) HandleRawParams(method string, path string, handler RawParamHandlerFunc) *RouterGroup {
 	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, nil, nil, handler, FastRequestOptions{}))
+	return r
+}
+
+func (r *RouterGroup) HandleRawParam(method string, path string, paramName string, handler RawSingleParamHandlerFunc) *RouterGroup {
+	next := newRouteLayer(strings.ToUpper(method), path, nil, nil, nil, nil, FastRequestOptions{})
+	next.rawSingleParam = handler
+	next.rawParamName = paramName
+	next.rawParamDirect = next.compiled.singleParamName() == paramName
+	r.addLayer(next)
 	return r
 }
 
@@ -443,6 +479,12 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 			}
 			return
 		}
+		if l.rawSingleParam != nil {
+			if err := l.rawSingleParam(w, native, params.directOrGet(l.rawParamName, l.rawParamDirect)); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
 		if req == nil {
 			if l.fastHandler != nil {
 				req = NewFastRequestWithOptions(native, l.fastOptions)
@@ -501,6 +543,12 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 		}
 		if l.rawParamHandler != nil {
 			if err := l.rawParamHandler(w, native, Params{params: routeParams{}}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawSingleParam != nil {
+			if err := l.rawSingleParam(w, native, ""); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return true
@@ -833,23 +881,11 @@ func (r *Request) Param(name string) string {
 			return value
 		}
 	}
-	for idx := 0; idx < r.params.len(); idx++ {
-		param := r.params.at(idx)
-		if param.name == name {
-			return param.value
-		}
-	}
-	return ""
+	return r.params.get(name)
 }
 
 func (p Params) Get(name string) string {
-	for idx := 0; idx < p.params.len(); idx++ {
-		param := p.params.at(idx)
-		if param.name == name {
-			return param.value
-		}
-	}
-	return ""
+	return p.params.get(name)
 }
 
 func (r *Request) setRouteParams(params routeParams, materializeMap bool) {
@@ -1254,6 +1290,18 @@ func (p routePattern) match(path string) (routeParams, bool) {
 		}
 	}
 	return params, !hasMorePath(path, pos)
+}
+
+func (p routePattern) singleParamName() string {
+	if p.paramCount != 1 {
+		return ""
+	}
+	for _, segment := range p.segments {
+		if segment.kind == ':' || segment.kind == '*' {
+			return segment.value
+		}
+	}
+	return ""
 }
 
 func nextPathSegment(path string, pos int) (string, int, bool) {

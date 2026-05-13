@@ -122,6 +122,30 @@ func TestRawParamHandlerReadsRouteParams(t *testing.T) {
 	}
 }
 
+func TestRawSingleParamHandlerReadsDirectRouteParam(t *testing.T) {
+	app := gopress.New()
+	app.HandleRawParam(http.MethodGet, "/users/:id", "id", func(w http.ResponseWriter, req *http.Request, id string) error {
+		return gopress.WriteJSONBytes(w, http.StatusOK, []byte(`{"id":"`+id+`"}`))
+	})
+	app.HandleRawParam(http.MethodGet, "/mismatch/:id", "slug", func(w http.ResponseWriter, req *http.Request, slug string) error {
+		return gopress.WriteRawString(w, http.StatusOK, "text/plain", slug)
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/123", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != `{"id":"123"}` {
+		t.Fatalf("unexpected response %d %q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mismatch/123", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "" {
+		t.Fatalf("mismatched raw param name should be empty, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRawRequestValueHelpers(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/search?page=42&name=Ada+Lovelace&empty=", nil)
 	req.Header.Set("Authorization", "Bearer token")
