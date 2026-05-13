@@ -25,6 +25,8 @@ type HandlerFunc func(*Request, *Response, NextFunc) error
 
 type FastHandlerFunc func(*Request, *Response) error
 
+type RawHandlerFunc func(http.ResponseWriter, *http.Request) error
+
 type ErrorHandlerFunc func(error, *Request, *Response, NextFunc) error
 
 type NextFunc func(args ...string) error
@@ -91,6 +93,7 @@ type layer struct {
 	prefixSlash   string
 	handlers      []HandlerFunc
 	fastHandler   FastHandlerFunc
+	rawHandler    RawHandlerFunc
 	fastOptions   FastRequestOptions
 	errorHandlers []ErrorHandlerFunc
 }
@@ -188,6 +191,11 @@ func (a *App) HandleFastOptions(method string, path string, options FastRequestO
 	return a
 }
 
+func (a *App) HandleRaw(method string, path string, handler RawHandlerFunc) *App {
+	a.router.HandleRaw(method, path, handler)
+	return a
+}
+
 func (a *App) Route(path string) *RouteBuilder {
 	return a.router.Route(path)
 }
@@ -260,17 +268,22 @@ func (r *RouterGroup) Head(path string, handlers ...HandlerFunc) *RouterGroup {
 }
 
 func (r *RouterGroup) Handle(method string, path string, handlers ...HandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, handlers, nil, FastRequestOptions{}))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, handlers, nil, nil, FastRequestOptions{}))
 	return r
 }
 
 func (r *RouterGroup) HandleFast(method string, path string, handler FastHandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, compatibleFastRequestOptions()))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, nil, compatibleFastRequestOptions()))
 	return r
 }
 
 func (r *RouterGroup) HandleFastOptions(method string, path string, options FastRequestOptions, handler FastHandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, options))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, nil, options))
+	return r
+}
+
+func (r *RouterGroup) HandleRaw(method string, path string, handler RawHandlerFunc) *RouterGroup {
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, nil, handler, FastRequestOptions{}))
 	return r
 }
 
@@ -370,6 +383,12 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 		if !ok {
 			continue
 		}
+		if l.rawHandler != nil {
+			if err := l.rawHandler(w, native); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
 		if req == nil {
 			if l.fastHandler != nil {
 				req = NewFastRequestWithOptions(native, l.fastOptions)
@@ -416,6 +435,12 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 		l := r.layers[idx]
 		if l.method != "ALL" && l.method != native.Method {
 			continue
+		}
+		if l.rawHandler != nil {
+			if err := l.rawHandler(w, native); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
 		}
 		if req == nil {
 			if l.fastHandler != nil {
@@ -749,6 +774,49 @@ func (r *Response) Send(body string) error {
 	return err
 }
 
+func WriteRawString(w http.ResponseWriter, status int, contentType string, body string) error {
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, err := io.WriteString(w, body)
+	return err
+}
+
+func WriteRawBytes(w http.ResponseWriter, status int, contentType string, body []byte) error {
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, err := w.Write(body)
+	return err
+}
+
+func WriteJSONString(w http.ResponseWriter, status int, body string) error {
+	return WriteRawString(w, status, "application/json", body)
+}
+
+func WriteJSONBytes(w http.ResponseWriter, status int, body []byte) error {
+	return WriteRawBytes(w, status, "application/json", body)
+}
+
+func WriteJSON(w http.ResponseWriter, status int, value any) error {
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	return json.NewEncoder(w).Encode(value)
+}
+
 func (r *Response) StatusSend(status int, contentType string, body string) error {
 	r.status = status
 	if contentType != "" {
@@ -957,9 +1025,9 @@ func pathHasPrefixPrepared(path string, prefix string, slash string) bool {
 	return path == prefix || strings.HasPrefix(path, slash)
 }
 
-func newRouteLayer(method string, path string, handlers []HandlerFunc, fastHandler FastHandlerFunc, fastOptions FastRequestOptions) layer {
+func newRouteLayer(method string, path string, handlers []HandlerFunc, fastHandler FastHandlerFunc, rawHandler RawHandlerFunc, fastOptions FastRequestOptions) layer {
 	pattern := normalizePath(path)
-	return layer{method: method, pattern: pattern, compiled: compileRoutePattern(pattern), handlers: handlers, fastHandler: fastHandler, fastOptions: fastOptions}
+	return layer{method: method, pattern: pattern, compiled: compileRoutePattern(pattern), handlers: handlers, fastHandler: fastHandler, rawHandler: rawHandler, fastOptions: fastOptions}
 }
 
 func newMiddlewareLayer(prefix string, handlers []HandlerFunc) layer {

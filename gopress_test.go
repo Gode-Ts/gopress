@@ -70,6 +70,44 @@ func TestFastHandlerAndJSONResponseFastPaths(t *testing.T) {
 	}
 }
 
+func TestRawHandlerAndWriteHelpers(t *testing.T) {
+	app := gopress.New()
+	app.HandleRaw(http.MethodGet, "/json-bytes", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteJSONBytes(w, http.StatusCreated, []byte(`{"ok":true}`))
+	})
+	app.HandleRaw(http.MethodGet, "/json-string", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteJSONString(w, http.StatusAccepted, `{"ok":true}`)
+	})
+	app.HandleRaw(http.MethodGet, "/text", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteRawString(w, http.StatusTeapot, "text/custom", "short")
+	})
+	app.HandleRaw(http.MethodGet, "/json-value", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	for _, tc := range []struct {
+		path        string
+		status      int
+		body        string
+		contentType string
+	}{
+		{path: "/json-bytes", status: http.StatusCreated, body: `{"ok":true}`, contentType: "application/json"},
+		{path: "/json-string", status: http.StatusAccepted, body: `{"ok":true}`, contentType: "application/json"},
+		{path: "/text", status: http.StatusTeapot, body: "short", contentType: "text/custom"},
+		{path: "/json-value", status: http.StatusOK, body: "{\"ok\":true}\n", contentType: "application/json"},
+	} {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+
+		if rec.Code != tc.status || rec.Body.String() != tc.body {
+			t.Fatalf("%s unexpected response %d %q", tc.path, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != tc.contentType {
+			t.Fatalf("%s unexpected content type %q", tc.path, got)
+		}
+	}
+}
+
 func TestFastHandlerOptionsAvoidUnneededMapsAndSupportParamLookup(t *testing.T) {
 	app := gopress.New()
 	app.HandleFastOptions(http.MethodGet, "/users/:id", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {
