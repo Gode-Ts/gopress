@@ -131,6 +131,23 @@ func BenchmarkGopressRawJSONBytesResponse(b *testing.B) {
 	}
 }
 
+func BenchmarkGopressRawJSONBytesWithErrorMiddleware(b *testing.B) {
+	app := gopress.New()
+	app.UseError(func(err error, req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {
+		return res.StatusSend(http.StatusInternalServerError, "text/plain", err.Error())
+	})
+	app.HandleRaw(http.MethodGet, "/json", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteJSONBytes(w, http.StatusOK, []byte(`{"id":"123","ok":true}`))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/json", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
 func BenchmarkGopressJSONBody(b *testing.B) {
 	app := gopress.New()
 	app.Use(gopress.JSON())

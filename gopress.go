@@ -309,6 +309,9 @@ func (r *RouterGroup) mount(prefix string, child *RouterGroup) {
 func (r *RouterGroup) addLayer(next layer) {
 	idx := len(r.layers)
 	r.layers = append(r.layers, next)
+	if len(next.errorHandlers) > 0 {
+		return
+	}
 	if next.pattern != "" && next.compiled.static {
 		if r.staticIndex == nil {
 			r.staticIndex = map[string][]int{}
@@ -373,7 +376,7 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 		return
 	}
 	var req *Request
-	res := NewResponse(w)
+	var res *Response
 	for idx := 0; idx < len(r.layers); idx++ {
 		l := r.layers[idx]
 		if len(l.errorHandlers) > 0 {
@@ -400,6 +403,9 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 		} else {
 			req.ensureOptions(native, compatibleFastRequestOptions())
 		}
+		if res == nil {
+			res = NewResponse(w)
+		}
 		req.setRouteParams(params, l.fastHandler == nil || l.fastOptions.Params)
 		var err error
 		nextRoute := false
@@ -415,11 +421,11 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 			r.handleError(idx+1, err, req, res)
 			return
 		}
-		if res.written {
+		if res != nil && res.written {
 			return
 		}
 	}
-	if !res.written {
+	if res == nil || !res.written {
 		http.NotFound(w, native)
 	}
 }
@@ -430,7 +436,7 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 		return false
 	}
 	var req *Request
-	res := NewResponse(w)
+	var res *Response
 	for _, idx := range candidates {
 		l := r.layers[idx]
 		if l.method != "ALL" && l.method != native.Method {
@@ -452,6 +458,9 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 			req.ensureOptions(native, l.fastOptions)
 		} else {
 			req.ensureOptions(native, compatibleFastRequestOptions())
+		}
+		if res == nil {
+			res = NewResponse(w)
 		}
 		var err error
 		nextRoute := false
