@@ -54,8 +54,8 @@ type App struct {
 type RouterGroup struct {
 	layers                 []layer
 	staticIndex            map[string][]int
-	dynamicIndex           map[string][]int
-	dynamicFallback        []int
+	routeIndex             map[string][]int
+	routeFallback          []int
 	hasSlowLayer           bool
 	hasOrderSensitiveLayer bool
 }
@@ -428,22 +428,24 @@ func (r *RouterGroup) addLayer(next layer) {
 		r.hasOrderSensitiveLayer = true
 		return
 	}
-	if next.pattern != "" && next.compiled.static {
+	if next.compiled.static {
 		if r.staticIndex == nil {
 			r.staticIndex = map[string][]int{}
 		}
 		r.staticIndex[next.compiled.staticPath] = append(r.staticIndex[next.compiled.staticPath], idx)
+	}
+	if segment, ok := next.compiled.firstIndexSegment(); ok {
+		if r.routeIndex == nil {
+			r.routeIndex = map[string][]int{}
+		}
+		r.routeIndex[segment] = append(r.routeIndex[segment], idx)
+	} else {
+		r.routeFallback = append(r.routeFallback, idx)
+	}
+	if next.compiled.static {
 		return
 	}
 	r.hasSlowLayer = true
-	if segment, ok := next.compiled.firstStaticSegment(); ok {
-		if r.dynamicIndex == nil {
-			r.dynamicIndex = map[string][]int{}
-		}
-		r.dynamicIndex[segment] = append(r.dynamicIndex[segment], idx)
-		return
-	}
-	r.dynamicFallback = append(r.dynamicFallback, idx)
 }
 
 type RouteBuilder struct {
@@ -492,8 +494,8 @@ func (b *RouteBuilder) Head(handlers ...HandlerFunc) *RouteBuilder {
 }
 
 func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPrefix string) {
-	if r.canServeDynamicIndexOnly() {
-		if r.serveDynamicIndexOnly(w, native) {
+	if r.canServeRouteIndexOnly() {
+		if r.serveRouteIndexOnly(w, native) {
 			return
 		}
 		http.NotFound(w, native)
@@ -671,16 +673,15 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 	return false
 }
 
-func (r *RouterGroup) canServeDynamicIndexOnly() bool {
+func (r *RouterGroup) canServeRouteIndexOnly() bool {
 	return r.hasSlowLayer &&
 		!r.hasOrderSensitiveLayer &&
-		len(r.staticIndex) == 0 &&
-		len(r.dynamicFallback) == 0 &&
-		len(r.dynamicIndex) > 0
+		len(r.routeFallback) == 0 &&
+		len(r.routeIndex) > 0
 }
 
-func (r *RouterGroup) serveDynamicIndexOnly(w http.ResponseWriter, native *http.Request) bool {
-	candidates := r.dynamicCandidates(native.URL.Path)
+func (r *RouterGroup) serveRouteIndexOnly(w http.ResponseWriter, native *http.Request) bool {
+	candidates := r.routeCandidates(native.URL.Path)
 	if len(candidates) == 0 {
 		return false
 	}
@@ -787,15 +788,15 @@ func (r *RouterGroup) staticCandidates(path string) []int {
 	return r.staticIndex[normalized]
 }
 
-func (r *RouterGroup) dynamicCandidates(path string) []int {
-	if len(r.dynamicIndex) == 0 {
+func (r *RouterGroup) routeCandidates(path string) []int {
+	if len(r.routeIndex) == 0 {
 		return nil
 	}
 	segment, ok := firstPathSegment(path)
 	if !ok {
 		return nil
 	}
-	return r.dynamicIndex[segment]
+	return r.routeIndex[segment]
 }
 
 func runHandlers(handlers []HandlerFunc, req *Request, res *Response) (error, bool) {
@@ -1583,8 +1584,11 @@ func (p routePattern) twoParamNames() (string, string, bool) {
 	return "", "", false
 }
 
-func (p routePattern) firstStaticSegment() (string, bool) {
-	if p.static || len(p.segments) == 0 {
+func (p routePattern) firstIndexSegment() (string, bool) {
+	if p.static {
+		return firstPathSegment(p.staticPath)
+	}
+	if len(p.segments) == 0 {
 		return "", false
 	}
 	first := p.segments[0]

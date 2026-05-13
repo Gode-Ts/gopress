@@ -54,14 +54,56 @@ func TestRouterIndexesDynamicRoutesByFirstStaticSegment(t *testing.T) {
 		return nil
 	})
 
-	if got := len(router.dynamicIndex["users"]); got != 1 {
+	if got := len(router.routeIndex["users"]); got != 1 {
 		t.Fatalf("expected one users candidate, got %d", got)
 	}
-	if got := len(router.dynamicIndex["posts"]); got != 1 {
+	if got := len(router.routeIndex["posts"]); got != 1 {
 		t.Fatalf("expected one posts candidate, got %d", got)
 	}
 	if router.hasOrderSensitiveLayer {
 		t.Fatal("plain dynamic routes should keep indexed dispatch enabled")
+	}
+}
+
+func TestRouterIndexesMixedStaticAndDynamicRoutes(t *testing.T) {
+	router := NewRouter()
+	router.HandleRaw("GET", "/health", func(w http.ResponseWriter, _ *http.Request) error {
+		return WriteRawString(w, http.StatusOK, "text/plain", "ok")
+	})
+	router.HandleRawParam("GET", "/users/:id", "id", func(w http.ResponseWriter, _ *http.Request, id string) error {
+		return WriteRawString(w, http.StatusOK, "text/plain", id)
+	})
+
+	if !router.canServeRouteIndexOnly() {
+		t.Fatal("mixed static and dynamic route-only apps should use indexed dispatch")
+	}
+	if got := len(router.routeIndex["health"]); got != 1 {
+		t.Fatalf("expected one health candidate, got %d", got)
+	}
+	if got := len(router.routeIndex["users"]); got != 1 {
+		t.Fatalf("expected one users candidate, got %d", got)
+	}
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/123", nil))
+	if rec.Body.String() != "123" {
+		t.Fatalf("expected dynamic response 123, got %q", rec.Body.String())
+	}
+}
+
+func TestRouterFirstSegmentIndexPreservesRegistrationOrder(t *testing.T) {
+	router := NewRouter()
+	router.HandleRawParam("GET", "/users/:id", "id", func(w http.ResponseWriter, _ *http.Request, id string) error {
+		return WriteRawString(w, http.StatusOK, "text/plain", "dynamic:"+id)
+	})
+	router.HandleRaw("GET", "/users/new", func(w http.ResponseWriter, _ *http.Request) error {
+		return WriteRawString(w, http.StatusOK, "text/plain", "static")
+	})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/new", nil))
+	if rec.Body.String() != "dynamic:new" {
+		t.Fatalf("expected dynamic route to preserve registration order, got %q", rec.Body.String())
 	}
 }
 
@@ -73,8 +115,42 @@ func BenchmarkRouterManyDynamicRawParamRoutesScan(b *testing.B) {
 	benchmarkManyDynamicRawParamRoutes(b, false)
 }
 
+func BenchmarkRouterMixedStaticDynamicRoutesIndexed(b *testing.B) {
+	benchmarkMixedStaticDynamicRoutes(b, true)
+}
+
+func BenchmarkRouterMixedStaticDynamicRoutesScan(b *testing.B) {
+	benchmarkMixedStaticDynamicRoutes(b, false)
+}
+
 func benchmarkManyDynamicRawParamRoutes(b *testing.B, indexed bool) {
 	router := NewRouter()
+	for i := 0; i < 100; i++ {
+		path := fmt.Sprintf("/resource-%d/:id", i)
+		router.HandleRawParam(http.MethodGet, path, "id", func(w http.ResponseWriter, req *http.Request, id string) error {
+			return WriteJSONBytes(w, http.StatusOK, []byte(`{"id":"`+id+`"}`))
+		})
+	}
+	if !indexed {
+		router.hasOrderSensitiveLayer = true
+	}
+	req := httptest.NewRequest(http.MethodGet, "/resource-99/123", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+	}
+}
+
+func benchmarkMixedStaticDynamicRoutes(b *testing.B, indexed bool) {
+	router := NewRouter()
+	for i := 0; i < 20; i++ {
+		path := fmt.Sprintf("/health-%d", i)
+		router.HandleRaw(http.MethodGet, path, func(w http.ResponseWriter, req *http.Request) error {
+			return WriteRawString(w, http.StatusOK, "text/plain", "ok")
+		})
+	}
 	for i := 0; i < 100; i++ {
 		path := fmt.Sprintf("/resource-%d/:id", i)
 		router.HandleRawParam(http.MethodGet, path, "id", func(w http.ResponseWriter, req *http.Request, id string) error {
