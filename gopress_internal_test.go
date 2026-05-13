@@ -1,6 +1,11 @@
 package gopress
 
-import "testing"
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestRoutePatternMatchAvoidsHeapForSingleParam(t *testing.T) {
 	pattern := compileRoutePattern("/users/:id")
@@ -37,5 +42,53 @@ func TestRoutePatternMatchDirectTwoParams(t *testing.T) {
 	}
 	if _, _, ok := pattern.matchDirectTwoParams("/users/u1/notes/n2/extra"); ok {
 		t.Fatal("expected trailing segment to miss")
+	}
+}
+
+func TestRouterIndexesDynamicRoutesByFirstStaticSegment(t *testing.T) {
+	router := NewRouter()
+	router.HandleRawParam("GET", "/users/:id", "id", func(http.ResponseWriter, *http.Request, string) error {
+		return nil
+	})
+	router.HandleRawParam("GET", "/posts/:id", "id", func(http.ResponseWriter, *http.Request, string) error {
+		return nil
+	})
+
+	if got := len(router.dynamicIndex["users"]); got != 1 {
+		t.Fatalf("expected one users candidate, got %d", got)
+	}
+	if got := len(router.dynamicIndex["posts"]); got != 1 {
+		t.Fatalf("expected one posts candidate, got %d", got)
+	}
+	if router.hasOrderSensitiveLayer {
+		t.Fatal("plain dynamic routes should keep indexed dispatch enabled")
+	}
+}
+
+func BenchmarkRouterManyDynamicRawParamRoutesIndexed(b *testing.B) {
+	benchmarkManyDynamicRawParamRoutes(b, true)
+}
+
+func BenchmarkRouterManyDynamicRawParamRoutesScan(b *testing.B) {
+	benchmarkManyDynamicRawParamRoutes(b, false)
+}
+
+func benchmarkManyDynamicRawParamRoutes(b *testing.B, indexed bool) {
+	router := NewRouter()
+	for i := 0; i < 100; i++ {
+		path := fmt.Sprintf("/resource-%d/:id", i)
+		router.HandleRawParam(http.MethodGet, path, "id", func(w http.ResponseWriter, req *http.Request, id string) error {
+			return WriteJSONBytes(w, http.StatusOK, []byte(`{"id":"`+id+`"}`))
+		})
+	}
+	if !indexed {
+		router.hasOrderSensitiveLayer = true
+	}
+	req := httptest.NewRequest(http.MethodGet, "/resource-99/123", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
 	}
 }

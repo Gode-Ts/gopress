@@ -52,9 +52,12 @@ type App struct {
 }
 
 type RouterGroup struct {
-	layers       []layer
-	staticIndex  map[string][]int
-	hasSlowLayer bool
+	layers                 []layer
+	staticIndex            map[string][]int
+	dynamicIndex           map[string][]int
+	dynamicFallback        []int
+	hasSlowLayer           bool
+	hasOrderSensitiveLayer bool
 }
 
 type Route struct {
@@ -420,6 +423,11 @@ func (r *RouterGroup) addLayer(next layer) {
 	if len(next.errorHandlers) > 0 {
 		return
 	}
+	if next.pattern == "" {
+		r.hasSlowLayer = true
+		r.hasOrderSensitiveLayer = true
+		return
+	}
 	if next.pattern != "" && next.compiled.static {
 		if r.staticIndex == nil {
 			r.staticIndex = map[string][]int{}
@@ -428,6 +436,14 @@ func (r *RouterGroup) addLayer(next layer) {
 		return
 	}
 	r.hasSlowLayer = true
+	if segment, ok := next.compiled.firstStaticSegment(); ok {
+		if r.dynamicIndex == nil {
+			r.dynamicIndex = map[string][]int{}
+		}
+		r.dynamicIndex[segment] = append(r.dynamicIndex[segment], idx)
+		return
+	}
+	r.dynamicFallback = append(r.dynamicFallback, idx)
 }
 
 type RouteBuilder struct {
@@ -476,6 +492,13 @@ func (b *RouteBuilder) Head(handlers ...HandlerFunc) *RouteBuilder {
 }
 
 func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPrefix string) {
+	if r.canServeDynamicIndexOnly() {
+		if r.serveDynamicIndexOnly(w, native) {
+			return
+		}
+		http.NotFound(w, native)
+		return
+	}
 	if !r.hasSlowLayer {
 		if r.serveStaticOnly(w, native) {
 			return
@@ -648,6 +671,108 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 	return false
 }
 
+func (r *RouterGroup) canServeDynamicIndexOnly() bool {
+	return r.hasSlowLayer &&
+		!r.hasOrderSensitiveLayer &&
+		len(r.staticIndex) == 0 &&
+		len(r.dynamicFallback) == 0 &&
+		len(r.dynamicIndex) > 0
+}
+
+func (r *RouterGroup) serveDynamicIndexOnly(w http.ResponseWriter, native *http.Request) bool {
+	candidates := r.dynamicCandidates(native.URL.Path)
+	if len(candidates) == 0 {
+		return false
+	}
+	var req *Request
+	var res *Response
+	for _, idx := range candidates {
+		l := r.layers[idx]
+		if l.rawSingleParam != nil && l.rawParamDirect {
+			param, ok := l.matchesDirectParam(native.Method, native.URL.Path)
+			if !ok {
+				continue
+			}
+			if err := l.rawSingleParam(w, native, param); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawTwoParams != nil && l.rawParamDirect {
+			first, second, ok := l.matchesDirectTwoParams(native.Method, native.URL.Path)
+			if !ok {
+				continue
+			}
+			if err := l.rawTwoParams(w, native, first, second); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		params, ok := l.matches(native.Method, native.URL.Path)
+		if !ok {
+			continue
+		}
+		if l.rawHandler != nil {
+			if err := l.rawHandler(w, native); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawParamHandler != nil {
+			if err := l.rawParamHandler(w, native, Params{params: params}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawSingleParam != nil {
+			if err := l.rawSingleParam(w, native, params.directOrGet(l.rawParamName, l.rawParamDirect)); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawTwoParams != nil {
+			first, second := params.twoDirectOrGet(l.rawParamName, l.rawParamName2, l.rawParamDirect)
+			if err := l.rawTwoParams(w, native, first, second); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if req == nil {
+			if l.fastHandler != nil {
+				req = NewFastRequestWithOptions(native, l.fastOptions)
+			} else {
+				req = NewRequest(native)
+			}
+		} else if l.fastHandler != nil {
+			req.ensureOptions(native, l.fastOptions)
+		} else {
+			req.ensureOptions(native, compatibleFastRequestOptions())
+		}
+		if res == nil {
+			res = NewResponse(w)
+		}
+		req.setRouteParams(params, l.fastHandler == nil || l.fastOptions.Params)
+		var err error
+		nextRoute := false
+		if l.fastHandler != nil {
+			err = l.fastHandler(req, res)
+		} else {
+			err, nextRoute = runHandlers(l.handlers, req, res)
+		}
+		if nextRoute {
+			continue
+		}
+		if err != nil {
+			r.handleError(idx+1, err, req, res)
+			return true
+		}
+		if res != nil && res.written {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *RouterGroup) staticCandidates(path string) []int {
 	if len(r.staticIndex) == 0 {
 		return nil
@@ -660,6 +785,17 @@ func (r *RouterGroup) staticCandidates(path string) []int {
 		return nil
 	}
 	return r.staticIndex[normalized]
+}
+
+func (r *RouterGroup) dynamicCandidates(path string) []int {
+	if len(r.dynamicIndex) == 0 {
+		return nil
+	}
+	segment, ok := firstPathSegment(path)
+	if !ok {
+		return nil
+	}
+	return r.dynamicIndex[segment]
 }
 
 func runHandlers(handlers []HandlerFunc, req *Request, res *Response) (error, bool) {
@@ -1447,6 +1583,17 @@ func (p routePattern) twoParamNames() (string, string, bool) {
 	return "", "", false
 }
 
+func (p routePattern) firstStaticSegment() (string, bool) {
+	if p.static || len(p.segments) == 0 {
+		return "", false
+	}
+	first := p.segments[0]
+	if first.kind != 's' || first.value == "" {
+		return "", false
+	}
+	return first.value, true
+}
+
 func nextPathSegment(path string, pos int) (string, int, bool) {
 	for pos < len(path) && path[pos] == '/' {
 		pos++
@@ -1459,6 +1606,19 @@ func nextPathSegment(path string, pos int) (string, int, bool) {
 		pos++
 	}
 	return path[start:pos], pos, true
+}
+
+func firstPathSegment(path string) (string, bool) {
+	for len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+	if path == "" {
+		return "", false
+	}
+	if idx := strings.IndexByte(path, '/'); idx >= 0 {
+		return path[:idx], idx > 0
+	}
+	return path, true
 }
 
 func restPath(path string, pos int) string {
