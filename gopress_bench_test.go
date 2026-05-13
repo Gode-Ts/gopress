@@ -159,6 +159,20 @@ func BenchmarkGopressRawSingleParamJSONBytesResponse(b *testing.B) {
 	}
 }
 
+func BenchmarkGopressRawTwoParamJSONBytesResponse(b *testing.B) {
+	app := gopress.New()
+	app.HandleRawParams2(http.MethodGet, "/users/:userId/notes/:noteId", "userId", "noteId", func(w http.ResponseWriter, req *http.Request, userId string, noteId string) error {
+		return gopress.WriteJSONBytes(w, http.StatusOK, []byte(`{"userId":"`+userId+`","noteId":"`+noteId+`"}`))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/users/u1/notes/n2", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
 func BenchmarkGopressRawQueryJSONBytesResponse(b *testing.B) {
 	app := gopress.New()
 	app.HandleRaw(http.MethodGet, "/search", func(w http.ResponseWriter, req *http.Request) error {

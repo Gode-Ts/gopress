@@ -32,6 +32,8 @@ type RawParamHandlerFunc func(http.ResponseWriter, *http.Request, Params) error
 
 type RawSingleParamHandlerFunc func(http.ResponseWriter, *http.Request, string) error
 
+type RawTwoParamHandlerFunc func(http.ResponseWriter, *http.Request, string, string) error
+
 type ErrorHandlerFunc func(error, *Request, *Response, NextFunc) error
 
 type NextFunc func(args ...string) error
@@ -105,7 +107,9 @@ type layer struct {
 	rawHandler      RawHandlerFunc
 	rawParamHandler RawParamHandlerFunc
 	rawSingleParam  RawSingleParamHandlerFunc
+	rawTwoParams    RawTwoParamHandlerFunc
 	rawParamName    string
+	rawParamName2   string
 	rawParamDirect  bool
 	fastOptions     FastRequestOptions
 	errorHandlers   []ErrorHandlerFunc
@@ -129,7 +133,7 @@ type routeParam struct {
 }
 
 type routeParams struct {
-	inline [1]routeParam
+	inline [2]routeParam
 	extra  []routeParam
 	count  int
 }
@@ -170,6 +174,13 @@ func (p routeParams) directOrGet(name string, direct bool) string {
 		return p.at(0).value
 	}
 	return p.get(name)
+}
+
+func (p routeParams) twoDirectOrGet(first string, second string, direct bool) (string, string) {
+	if direct && p.len() == 2 {
+		return p.at(0).value, p.at(1).value
+	}
+	return p.get(first), p.get(second)
 }
 
 func New() *App {
@@ -260,6 +271,11 @@ func (a *App) HandleRawParams(method string, path string, handler RawParamHandle
 
 func (a *App) HandleRawParam(method string, path string, paramName string, handler RawSingleParamHandlerFunc) *App {
 	a.router.HandleRawParam(method, path, paramName, handler)
+	return a
+}
+
+func (a *App) HandleRawParams2(method string, path string, firstParam string, secondParam string, handler RawTwoParamHandlerFunc) *App {
+	a.router.HandleRawParams2(method, path, firstParam, secondParam, handler)
 	return a
 }
 
@@ -364,6 +380,17 @@ func (r *RouterGroup) HandleRawParam(method string, path string, paramName strin
 	next.rawSingleParam = handler
 	next.rawParamName = paramName
 	next.rawParamDirect = next.compiled.singleParamName() == paramName
+	r.addLayer(next)
+	return r
+}
+
+func (r *RouterGroup) HandleRawParams2(method string, path string, firstParam string, secondParam string, handler RawTwoParamHandlerFunc) *RouterGroup {
+	next := newRouteLayer(strings.ToUpper(method), path, nil, nil, nil, nil, FastRequestOptions{})
+	next.rawTwoParams = handler
+	next.rawParamName = firstParam
+	next.rawParamName2 = secondParam
+	first, second, ok := next.compiled.twoParamNames()
+	next.rawParamDirect = ok && first == firstParam && second == secondParam
 	r.addLayer(next)
 	return r
 }
@@ -485,6 +512,13 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 			}
 			return
 		}
+		if l.rawTwoParams != nil {
+			first, second := params.twoDirectOrGet(l.rawParamName, l.rawParamName2, l.rawParamDirect)
+			if err := l.rawTwoParams(w, native, first, second); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
 		if req == nil {
 			if l.fastHandler != nil {
 				req = NewFastRequestWithOptions(native, l.fastOptions)
@@ -549,6 +583,12 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 		}
 		if l.rawSingleParam != nil {
 			if err := l.rawSingleParam(w, native, ""); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawTwoParams != nil {
+			if err := l.rawTwoParams(w, native, "", ""); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return true
@@ -1302,6 +1342,25 @@ func (p routePattern) singleParamName() string {
 		}
 	}
 	return ""
+}
+
+func (p routePattern) twoParamNames() (string, string, bool) {
+	if p.paramCount != 2 {
+		return "", "", false
+	}
+	var names [2]string
+	idx := 0
+	for _, segment := range p.segments {
+		if segment.kind != ':' && segment.kind != '*' {
+			continue
+		}
+		names[idx] = segment.value
+		idx++
+		if idx == len(names) {
+			return names[0], names[1], true
+		}
+	}
+	return "", "", false
 }
 
 func nextPathSegment(path string, pos int) (string, int, bool) {

@@ -146,6 +146,30 @@ func TestRawSingleParamHandlerReadsDirectRouteParam(t *testing.T) {
 	}
 }
 
+func TestRawTwoParamHandlerReadsDirectRouteParams(t *testing.T) {
+	app := gopress.New()
+	app.HandleRawParams2(http.MethodGet, "/users/:userId/notes/:noteId", "userId", "noteId", func(w http.ResponseWriter, req *http.Request, userId string, noteId string) error {
+		return gopress.WriteJSONBytes(w, http.StatusOK, []byte(`{"userId":"`+userId+`","noteId":"`+noteId+`"}`))
+	})
+	app.HandleRawParams2(http.MethodGet, "/fallback/:userId/notes/:noteId", "noteId", "userId", func(w http.ResponseWriter, req *http.Request, noteId string, userId string) error {
+		return gopress.WriteRawString(w, http.StatusOK, "text/plain", noteId+"/"+userId)
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/u1/notes/n2", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != `{"userId":"u1","noteId":"n2"}` {
+		t.Fatalf("unexpected response %d %q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/fallback/u3/notes/n4", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "n4/u3" {
+		t.Fatalf("unexpected fallback response %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRawRequestValueHelpers(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/search?page=42&name=Ada+Lovelace&empty=", nil)
 	req.Header.Set("Authorization", "Bearer token")
