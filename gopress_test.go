@@ -108,6 +108,20 @@ func TestRawHandlerAndWriteHelpers(t *testing.T) {
 	}
 }
 
+func TestRawParamHandlerReadsRouteParams(t *testing.T) {
+	app := gopress.New()
+	app.HandleRawParams(http.MethodGet, "/users/:id", func(w http.ResponseWriter, req *http.Request, params gopress.Params) error {
+		return gopress.WriteJSONBytes(w, http.StatusOK, []byte(`{"id":"`+params.Get("id")+`"}`))
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/123", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != `{"id":"123"}` {
+		t.Fatalf("unexpected response %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFastHandlerOptionsAvoidUnneededMapsAndSupportParamLookup(t *testing.T) {
 	app := gopress.New()
 	app.HandleFastOptions(http.MethodGet, "/users/:id", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {

@@ -27,6 +27,8 @@ type FastHandlerFunc func(*Request, *Response) error
 
 type RawHandlerFunc func(http.ResponseWriter, *http.Request) error
 
+type RawParamHandlerFunc func(http.ResponseWriter, *http.Request, Params) error
+
 type ErrorHandlerFunc func(error, *Request, *Response, NextFunc) error
 
 type NextFunc func(args ...string) error
@@ -70,6 +72,10 @@ type Request struct {
 	params routeParams
 }
 
+type Params struct {
+	params routeParams
+}
+
 type Response struct {
 	writer      http.ResponseWriter
 	status      int
@@ -86,16 +92,17 @@ type ServerConfig struct {
 }
 
 type layer struct {
-	method        string
-	pattern       string
-	compiled      routePattern
-	prefix        string
-	prefixSlash   string
-	handlers      []HandlerFunc
-	fastHandler   FastHandlerFunc
-	rawHandler    RawHandlerFunc
-	fastOptions   FastRequestOptions
-	errorHandlers []ErrorHandlerFunc
+	method          string
+	pattern         string
+	compiled        routePattern
+	prefix          string
+	prefixSlash     string
+	handlers        []HandlerFunc
+	fastHandler     FastHandlerFunc
+	rawHandler      RawHandlerFunc
+	rawParamHandler RawParamHandlerFunc
+	fastOptions     FastRequestOptions
+	errorHandlers   []ErrorHandlerFunc
 }
 
 type routePattern struct {
@@ -223,6 +230,11 @@ func (a *App) HandleRaw(method string, path string, handler RawHandlerFunc) *App
 	return a
 }
 
+func (a *App) HandleRawParams(method string, path string, handler RawParamHandlerFunc) *App {
+	a.router.HandleRawParams(method, path, handler)
+	return a
+}
+
 func (a *App) Route(path string) *RouteBuilder {
 	return a.router.Route(path)
 }
@@ -295,22 +307,27 @@ func (r *RouterGroup) Head(path string, handlers ...HandlerFunc) *RouterGroup {
 }
 
 func (r *RouterGroup) Handle(method string, path string, handlers ...HandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, handlers, nil, nil, FastRequestOptions{}))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, handlers, nil, nil, nil, FastRequestOptions{}))
 	return r
 }
 
 func (r *RouterGroup) HandleFast(method string, path string, handler FastHandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, nil, compatibleFastRequestOptions()))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, nil, nil, compatibleFastRequestOptions()))
 	return r
 }
 
 func (r *RouterGroup) HandleFastOptions(method string, path string, options FastRequestOptions, handler FastHandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, nil, options))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, handler, nil, nil, options))
 	return r
 }
 
 func (r *RouterGroup) HandleRaw(method string, path string, handler RawHandlerFunc) *RouterGroup {
-	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, nil, handler, FastRequestOptions{}))
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, nil, handler, nil, FastRequestOptions{}))
+	return r
+}
+
+func (r *RouterGroup) HandleRawParams(method string, path string, handler RawParamHandlerFunc) *RouterGroup {
+	r.addLayer(newRouteLayer(strings.ToUpper(method), path, nil, nil, nil, handler, FastRequestOptions{}))
 	return r
 }
 
@@ -419,6 +436,12 @@ func (r *RouterGroup) serve(w http.ResponseWriter, native *http.Request, mountPr
 			}
 			return
 		}
+		if l.rawParamHandler != nil {
+			if err := l.rawParamHandler(w, native, Params{params: params}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
 		if req == nil {
 			if l.fastHandler != nil {
 				req = NewFastRequestWithOptions(native, l.fastOptions)
@@ -471,6 +494,12 @@ func (r *RouterGroup) serveStaticOnly(w http.ResponseWriter, native *http.Reques
 		}
 		if l.rawHandler != nil {
 			if err := l.rawHandler(w, native); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return true
+		}
+		if l.rawParamHandler != nil {
+			if err := l.rawParamHandler(w, native, Params{params: routeParams{}}); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 			return true
@@ -722,6 +751,16 @@ func (r *Request) Param(name string) string {
 	}
 	for idx := 0; idx < r.params.len(); idx++ {
 		param := r.params.at(idx)
+		if param.name == name {
+			return param.value
+		}
+	}
+	return ""
+}
+
+func (p Params) Get(name string) string {
+	for idx := 0; idx < p.params.len(); idx++ {
+		param := p.params.at(idx)
 		if param.name == name {
 			return param.value
 		}
@@ -1063,9 +1102,9 @@ func pathHasPrefixPrepared(path string, prefix string, slash string) bool {
 	return path == prefix || strings.HasPrefix(path, slash)
 }
 
-func newRouteLayer(method string, path string, handlers []HandlerFunc, fastHandler FastHandlerFunc, rawHandler RawHandlerFunc, fastOptions FastRequestOptions) layer {
+func newRouteLayer(method string, path string, handlers []HandlerFunc, fastHandler FastHandlerFunc, rawHandler RawHandlerFunc, rawParamHandler RawParamHandlerFunc, fastOptions FastRequestOptions) layer {
 	pattern := normalizePath(path)
-	return layer{method: method, pattern: pattern, compiled: compileRoutePattern(pattern), handlers: handlers, fastHandler: fastHandler, rawHandler: rawHandler, fastOptions: fastOptions}
+	return layer{method: method, pattern: pattern, compiled: compileRoutePattern(pattern), handlers: handlers, fastHandler: fastHandler, rawHandler: rawHandler, rawParamHandler: rawParamHandler, fastOptions: fastOptions}
 }
 
 func newMiddlewareLayer(prefix string, handlers []HandlerFunc) layer {
