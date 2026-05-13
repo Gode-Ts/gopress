@@ -145,6 +145,20 @@ func BenchmarkGopressRawParamJSONBytesResponse(b *testing.B) {
 	}
 }
 
+func BenchmarkGopressRawQueryJSONBytesResponse(b *testing.B) {
+	app := gopress.New()
+	app.HandleRaw(http.MethodGet, "/search", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteJSONBytes(w, http.StatusOK, []byte(`{"page":"`+gopress.QueryValue(req, "page")+`"}`))
+	})
+	req := httptest.NewRequest(http.MethodGet, "/search?page=42", nil)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+	}
+}
+
 func BenchmarkGopressRawJSONBytesWithErrorMiddleware(b *testing.B) {
 	app := gopress.New()
 	app.UseError(func(err error, req *gopress.Request, res *gopress.Response, next gopress.NextFunc) error {

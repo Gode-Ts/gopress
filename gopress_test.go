@@ -122,6 +122,31 @@ func TestRawParamHandlerReadsRouteParams(t *testing.T) {
 	}
 }
 
+func TestRawRequestValueHelpers(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/search?page=42&name=Ada+Lovelace&empty=", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Cookie", "session=abc123; theme=dark")
+
+	if got := gopress.QueryValue(req, "page"); got != "42" {
+		t.Fatalf("unexpected query page %q", got)
+	}
+	if got := gopress.QueryValue(req, "name"); got != "Ada Lovelace" {
+		t.Fatalf("unexpected decoded query name %q", got)
+	}
+	if got := gopress.QueryValue(req, "empty"); got != "" {
+		t.Fatalf("unexpected empty query value %q", got)
+	}
+	if got := gopress.HeaderValue(req, "authorization"); got != "Bearer token" {
+		t.Fatalf("unexpected header value %q", got)
+	}
+	if got := gopress.CookieValue(req, "session"); got != "abc123" {
+		t.Fatalf("unexpected cookie value %q", got)
+	}
+	if got := gopress.CookieValue(req, "missing"); got != "" {
+		t.Fatalf("unexpected missing cookie value %q", got)
+	}
+}
+
 func TestFastHandlerOptionsAvoidUnneededMapsAndSupportParamLookup(t *testing.T) {
 	app := gopress.New()
 	app.HandleFastOptions(http.MethodGet, "/users/:id", gopress.FastRequestOptions{}, func(req *gopress.Request, res *gopress.Response) error {

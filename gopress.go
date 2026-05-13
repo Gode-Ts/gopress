@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -741,6 +742,89 @@ func cookieValues(req *http.Request) map[string]string {
 		cookies[cookie.Name] = cookie.Value
 	}
 	return cookies
+}
+
+func QueryValue(req *http.Request, key string) string {
+	if req == nil || req.URL == nil || key == "" {
+		return ""
+	}
+	query := req.URL.RawQuery
+	for len(query) > 0 {
+		part := query
+		if idx := strings.IndexByte(query, '&'); idx >= 0 {
+			part = query[:idx]
+			query = query[idx+1:]
+		} else {
+			query = ""
+		}
+		if part == "" {
+			continue
+		}
+		rawKey := part
+		rawValue := ""
+		if idx := strings.IndexByte(part, '='); idx >= 0 {
+			rawKey = part[:idx]
+			rawValue = part[idx+1:]
+		}
+		if !queryComponentEqual(rawKey, key) {
+			continue
+		}
+		return decodeQueryComponent(rawValue)
+	}
+	return ""
+}
+
+func HeaderValue(req *http.Request, key string) string {
+	if req == nil {
+		return ""
+	}
+	return req.Header.Get(key)
+}
+
+func CookieValue(req *http.Request, key string) string {
+	if req == nil || key == "" {
+		return ""
+	}
+	for _, header := range req.Header.Values("Cookie") {
+		for len(header) > 0 {
+			part := header
+			if idx := strings.IndexByte(header, ';'); idx >= 0 {
+				part = header[:idx]
+				header = header[idx+1:]
+			} else {
+				header = ""
+			}
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			name, value, ok := strings.Cut(part, "=")
+			if !ok || strings.TrimSpace(name) != key {
+				continue
+			}
+			return strings.Trim(value, `"`)
+		}
+	}
+	return ""
+}
+
+func queryComponentEqual(raw string, value string) bool {
+	if !strings.ContainsAny(raw, "+%") {
+		return raw == value
+	}
+	decoded, err := url.QueryUnescape(raw)
+	return err == nil && decoded == value
+}
+
+func decodeQueryComponent(raw string) string {
+	if !strings.ContainsAny(raw, "+%") {
+		return raw
+	}
+	decoded, err := url.QueryUnescape(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
 }
 
 func (r *Request) Param(name string) string {
