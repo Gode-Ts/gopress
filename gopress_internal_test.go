@@ -25,12 +25,24 @@ func TestRoutePatternMatchAvoidsHeapForSingleParam(t *testing.T) {
 
 func TestRoutePatternMatchDirectParam(t *testing.T) {
 	pattern := compileRoutePattern("/users/:id")
+	if !pattern.directSingle.ok {
+		t.Fatal("expected single param route to precompute direct matcher")
+	}
 	value, ok := pattern.matchDirectParam("/users/123")
 	if !ok || value != "123" {
 		t.Fatalf("expected direct param 123, got value=%q ok=%v", value, ok)
 	}
+	if value, ok := compileRoutePattern("/users/:id/notes").matchDirectParam("/users/123/notes/"); !ok || value != "123" {
+		t.Fatalf("expected middle direct param 123, got value=%q ok=%v", value, ok)
+	}
+	if value, ok := compileRoutePattern("/users/:id/notes").matchDirectParam("/users//123//notes"); !ok || value != "123" {
+		t.Fatalf("expected duplicate slash direct param 123, got value=%q ok=%v", value, ok)
+	}
 	if _, ok := pattern.matchDirectParam("/users/123/extra"); ok {
 		t.Fatal("expected trailing segment to miss")
+	}
+	if _, ok := pattern.matchDirectParam("/users/"); ok {
+		t.Fatal("expected empty param to miss")
 	}
 }
 

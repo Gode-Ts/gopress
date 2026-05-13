@@ -120,15 +120,22 @@ type layer struct {
 }
 
 type routePattern struct {
-	static     bool
-	staticPath string
-	segments   []routeSegment
-	paramCount int
+	static       bool
+	staticPath   string
+	segments     []routeSegment
+	paramCount   int
+	directSingle directSingleParamPattern
 }
 
 type routeSegment struct {
 	kind  byte
 	value string
+}
+
+type directSingleParamPattern struct {
+	ok     bool
+	prefix string
+	suffix string
 }
 
 type routeParam struct {
@@ -1504,6 +1511,7 @@ func compileRoutePattern(pattern string) routePattern {
 			compiled.segments = append(compiled.segments, routeSegment{kind: 's', value: part})
 		}
 	}
+	compiled.directSingle = compileDirectSingleParamPattern(compiled)
 	return compiled
 }
 
@@ -1540,6 +1548,9 @@ func (p routePattern) match(path string) (routeParams, bool) {
 }
 
 func (p routePattern) matchDirectParam(path string) (string, bool) {
+	if p.directSingle.ok {
+		return p.directSingle.match(path)
+	}
 	values, ok := p.matchDirectParams(path, 1)
 	return values[0], ok
 }
@@ -1644,6 +1655,85 @@ func (p routePattern) firstIndexSegment() (string, bool) {
 		return "", false
 	}
 	return b.String(), true
+}
+
+func compileDirectSingleParamPattern(pattern routePattern) directSingleParamPattern {
+	if pattern.static || pattern.paramCount != 1 {
+		return directSingleParamPattern{}
+	}
+	prefix := "/"
+	suffix := ""
+	seenParam := false
+	for _, segment := range pattern.segments {
+		switch segment.kind {
+		case ':':
+			if seenParam {
+				return directSingleParamPattern{}
+			}
+			seenParam = true
+		case '*':
+			return directSingleParamPattern{}
+		default:
+			if !seenParam {
+				if prefix != "/" {
+					prefix += "/"
+				}
+				prefix += segment.value
+				continue
+			}
+			suffix += "/" + segment.value
+		}
+	}
+	if !seenParam {
+		return directSingleParamPattern{}
+	}
+	if prefix != "/" {
+		prefix += "/"
+	}
+	return directSingleParamPattern{ok: true, prefix: prefix, suffix: suffix}
+}
+
+func (p directSingleParamPattern) match(path string) (string, bool) {
+	prefixLen := len(p.prefix)
+	if len(path) < prefixLen || path[:prefixLen] != p.prefix {
+		return "", false
+	}
+	start := prefixLen
+	end := len(path)
+	if p.suffix != "" {
+		for end > prefixLen && path[end-1] == '/' {
+			end--
+		}
+		suffixLen := len(p.suffix)
+		if end < prefixLen+suffixLen || path[end-suffixLen:end] != p.suffix {
+			return "", false
+		}
+		end -= suffixLen
+		for end > start && path[end-1] == '/' {
+			end--
+		}
+	} else {
+		if start < end && path[start] != '/' && path[end-1] != '/' {
+			if strings.IndexByte(path[start:end], '/') >= 0 {
+				return "", false
+			}
+			return path[start:end], true
+		}
+		for end > prefixLen && path[end-1] == '/' {
+			end--
+		}
+	}
+	for start < end && path[start] == '/' {
+		start++
+	}
+	if end <= start {
+		return "", false
+	}
+	value := path[start:end]
+	if strings.Contains(value, "/") {
+		return "", false
+	}
+	return value, true
 }
 
 func staticPathIndexKey(path string) (string, bool) {
