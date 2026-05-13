@@ -75,6 +75,9 @@ func TestRawHandlerAndWriteHelpers(t *testing.T) {
 	app.HandleRaw(http.MethodGet, "/json-bytes", func(w http.ResponseWriter, req *http.Request) error {
 		return gopress.WriteJSONBytes(w, http.StatusCreated, []byte(`{"ok":true}`))
 	})
+	app.HandleRaw(http.MethodGet, "/json-bytes-ok", func(w http.ResponseWriter, req *http.Request) error {
+		return gopress.WriteJSONBytesOK(w, []byte(`{"ok":true}`))
+	})
 	app.HandleRaw(http.MethodGet, "/json-string", func(w http.ResponseWriter, req *http.Request) error {
 		return gopress.WriteJSONString(w, http.StatusAccepted, `{"ok":true}`)
 	})
@@ -92,6 +95,7 @@ func TestRawHandlerAndWriteHelpers(t *testing.T) {
 		contentType string
 	}{
 		{path: "/json-bytes", status: http.StatusCreated, body: `{"ok":true}`, contentType: "application/json"},
+		{path: "/json-bytes-ok", status: http.StatusOK, body: `{"ok":true}`, contentType: "application/json"},
 		{path: "/json-string", status: http.StatusAccepted, body: `{"ok":true}`, contentType: "application/json"},
 		{path: "/text", status: http.StatusTeapot, body: "short", contentType: "text/custom"},
 		{path: "/json-value", status: http.StatusOK, body: "{\"ok\":true}\n", contentType: "application/json"},

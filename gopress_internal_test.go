@@ -7,6 +7,52 @@ import (
 	"testing"
 )
 
+type allocationResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *allocationResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *allocationResponseWriter) Write(body []byte) (int, error) {
+	return len(body), nil
+}
+
+func (w *allocationResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *allocationResponseWriter) reset() {
+	for key := range w.header {
+		delete(w.header, key)
+	}
+	w.status = 0
+}
+
+func TestWriteJSONBytesAvoidsHeaderSetAllocation(t *testing.T) {
+	writer := &allocationResponseWriter{header: http.Header{}}
+	body := []byte(`{"ok":true}`)
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		writer.reset()
+		if err := WriteJSONBytes(writer, http.StatusOK, body); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if allocs > 0 {
+		t.Fatalf("WriteJSONBytes should avoid per-response helper allocations, got %.0f allocs/run", allocs)
+	}
+	if got := writer.header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("unexpected content type %q", got)
+	}
+	if writer.status != http.StatusOK {
+		t.Fatalf("unexpected status %d", writer.status)
+	}
+}
+
 func TestRoutePatternMatchAvoidsHeapForSingleParam(t *testing.T) {
 	pattern := compileRoutePattern("/users/:id")
 	allocs := testing.AllocsPerRun(1000, func() {

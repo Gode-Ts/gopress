@@ -23,6 +23,12 @@ import (
 
 var errNextRoute = errors.New("gopress: next route")
 
+var (
+	contentTypeJSONHeader        = []string{"application/json"}
+	contentTypeTextPlainHeader   = []string{"text/plain"}
+	contentTypeOctetStreamHeader = []string{"application/octet-stream"}
+)
+
 type HandlerFunc func(*Request, *Response, NextFunc) error
 
 type FastHandlerFunc func(*Request, *Response) error
@@ -1239,7 +1245,7 @@ func WriteRawString(w http.ResponseWriter, status int, contentType string, body 
 	if contentType == "" {
 		contentType = "text/plain"
 	}
-	w.Header().Set("Content-Type", contentType)
+	setResponseContentType(w.Header(), contentType)
 	w.WriteHeader(status)
 	_, err := io.WriteString(w, body)
 	return err
@@ -1252,7 +1258,7 @@ func WriteRawBytes(w http.ResponseWriter, status int, contentType string, body [
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	w.Header().Set("Content-Type", contentType)
+	setResponseContentType(w.Header(), contentType)
 	w.WriteHeader(status)
 	_, err := w.Write(body)
 	return err
@@ -1266,11 +1272,18 @@ func WriteJSONBytes(w http.ResponseWriter, status int, body []byte) error {
 	return WriteRawBytes(w, status, "application/json", body)
 }
 
+func WriteJSONBytesOK(w http.ResponseWriter, body []byte) error {
+	setResponseContentType(w.Header(), "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, err := w.Write(body)
+	return err
+}
+
 func WriteJSON(w http.ResponseWriter, status int, value any) error {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	w.Header().Set("Content-Type", "application/json")
+	setResponseContentType(w.Header(), "application/json")
 	w.WriteHeader(status)
 	return json.NewEncoder(w).Encode(value)
 }
@@ -1363,10 +1376,23 @@ func (r *Response) writeHeaders() {
 		return
 	}
 	if r.contentType != "" {
-		r.writer.Header().Set("Content-Type", r.contentType)
+		setResponseContentType(r.writer.Header(), r.contentType)
 	}
 	r.writer.WriteHeader(r.status)
 	r.written = true
+}
+
+func setResponseContentType(header http.Header, contentType string) {
+	switch contentType {
+	case "application/json":
+		header["Content-Type"] = contentTypeJSONHeader
+	case "text/plain":
+		header["Content-Type"] = contentTypeTextPlainHeader
+	case "application/octet-stream":
+		header["Content-Type"] = contentTypeOctetStreamHeader
+	default:
+		header.Set("Content-Type", contentType)
+	}
 }
 
 func JSON() HandlerFunc {
